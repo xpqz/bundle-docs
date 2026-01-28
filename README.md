@@ -16,10 +16,10 @@ A CLI tool that bundles Dyalog APL documentation into a SQLite database for offl
 go install github.com/xpqz/bundle-docs@latest
 ```
 
-Or build from source:
+Or build from source (requires FTS5 build tag for full-text search):
 
 ```bash
-go build .
+go build -tags "fts5" .
 ```
 
 ## Usage
@@ -54,15 +54,36 @@ go build .
 
 ```sql
 CREATE TABLE docs (
-    path TEXT PRIMARY KEY,    -- Navigation breadcrumb (e.g. "Language Reference / Primitive Functions / Iota")
+    path TEXT PRIMARY KEY,    -- Navigation breadcrumb (e.g. "Core Reference / ... / Index Generator")
     file TEXT NOT NULL,       -- Relative file path in repo
-    content TEXT NOT NULL     -- Markdown content (front-matter stripped, HTML converted)
+    title TEXT NOT NULL,      -- H1 title extracted from the document
+    content TEXT NOT NULL,    -- Markdown content (front-matter stripped, HTML converted)
+    exclude INTEGER NOT NULL  -- 1 for disambiguation pages, 0 otherwise
 );
+
+-- FTS5 virtual table for full-text search
+CREATE VIRTUAL TABLE docs_fts USING fts5(path, title, content, content='docs');
 
 CREATE TABLE help_urls (
     symbol TEXT PRIMARY KEY,  -- APL symbol (e.g. "⍳", ":If")
     path TEXT NOT NULL        -- References docs.path
 );
+```
+
+### Full-text search example
+
+```sql
+-- Search for documents mentioning "iota"
+SELECT path, title FROM docs_fts WHERE docs_fts MATCH 'iota' LIMIT 10;
+
+-- Search with ranking
+SELECT path, title, rank FROM docs_fts WHERE docs_fts MATCH 'primitive function' ORDER BY rank LIMIT 10;
+
+-- Exclude disambiguation pages from results
+SELECT d.path, d.title
+FROM docs_fts f
+JOIN docs d ON f.rowid = d.rowid
+WHERE f.docs_fts MATCH 'grade' AND d.exclude = 0;
 ```
 
 ## symbol-urls.json format

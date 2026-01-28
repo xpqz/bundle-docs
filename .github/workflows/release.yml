@@ -22,7 +22,7 @@ jobs:
           go-version: '1.24'
 
       - name: Build
-        run: go build -o bundle-docs .
+        run: go build -tags "fts5" -o bundle-docs .
 
       - name: Generate database
         run: ./bundle-docs -repo https://github.com/Dyalog/documentation.git -o dyalog-docs.db

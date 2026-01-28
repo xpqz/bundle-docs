@@ -82,8 +82,21 @@ func main() {
 		CREATE TABLE docs (
 			path TEXT PRIMARY KEY,
 			file TEXT NOT NULL,
-			content TEXT NOT NULL
+			title TEXT NOT NULL,
+			content TEXT NOT NULL,
+			exclude INTEGER NOT NULL DEFAULT 0
 		);
+		CREATE VIRTUAL TABLE docs_fts USING fts5(
+			path,
+			title,
+			content,
+			content='docs',
+			content_rowid='rowid'
+		);
+		CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
+			INSERT INTO docs_fts(rowid, path, title, content)
+			VALUES (NEW.rowid, NEW.path, NEW.title, NEW.content);
+		END;
 		CREATE TABLE help_urls (
 			symbol TEXT PRIMARY KEY,
 			path TEXT NOT NULL
@@ -96,13 +109,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ins, err := tx.Prepare("INSERT OR IGNORE INTO docs (path, file, content) VALUES (?, ?, ?)")
+	ins, err := tx.Prepare("INSERT OR IGNORE INTO docs (path, file, title, content, exclude) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	for _, d := range docs {
-		if _, err := ins.Exec(d.path, d.file, d.content); err != nil {
+		exclude := 0
+		if d.exclude {
+			exclude = 1
+		}
+		if _, err := ins.Exec(d.path, d.file, d.title, d.content, exclude); err != nil {
 			log.Printf("insert %s: %v", d.path, err)
 		}
 	}
@@ -133,7 +150,7 @@ func main() {
 			if err != nil {
 				log.Fatal(err)
 			}
-			docIns, err := tx2.Prepare("INSERT OR IGNORE INTO docs (path, file, content) VALUES (?, ?, ?)")
+			docIns, err := tx2.Prepare("INSERT OR IGNORE INTO docs (path, file, title, content, exclude) VALUES (?, ?, ?, ?, ?)")
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -142,11 +159,11 @@ func main() {
 					continue // already in docs
 				}
 				// Try to find the markdown file in the repo
-				navPath, filePath, content, ok := findHelpFile(e.url, tmpDir)
+				navPath, filePath, title, content, ok := findHelpFile(e.url, tmpDir)
 				if !ok {
 					continue
 				}
-				docIns.Exec(navPath, filePath, content)
+				docIns.Exec(navPath, filePath, title, content, 1) // exclude=1 for disambiguation pages
 				fileIndex[normalizeFilePath(filePath)] = navPath
 				added++
 			}
@@ -186,7 +203,9 @@ func main() {
 type docEntry struct {
 	path    string // nav breadcrumb
 	file    string // relative path in repo
+	title   string // h1 title from document
 	content string
+	exclude bool // true for disambiguation pages
 }
 
 func parseMkdocs(path string) (*mkdocsConfig, error) {
@@ -290,7 +309,7 @@ func addDoc(mdPath, docsDir, repoRoot string, breadcrumb []string, out *[]docEnt
 		log.Printf("warning: %s: %v", mdPath, err)
 		return
 	}
-	content := cleanContent(raw)
+	title, content := extractTitleAndClean(raw)
 
 	relFile, _ := filepath.Rel(repoRoot, absPath)
 	navPath := strings.Join(breadcrumb, " / ")
@@ -298,10 +317,16 @@ func addDoc(mdPath, docsDir, repoRoot string, breadcrumb []string, out *[]docEnt
 		navPath = mdPath
 	}
 
+	// Use last breadcrumb segment as fallback title
+	if title == "" && len(breadcrumb) > 0 {
+		title = breadcrumb[len(breadcrumb)-1]
+	}
+
 	*out = append(*out, docEntry{
 		path:    navPath,
 		file:    relFile,
-		content: string(content),
+		title:   title,
+		content: content,
 	})
 }
 
@@ -369,14 +394,14 @@ func matchHelpURL(url string, fileIndex map[string]string) (string, bool) {
 
 // findHelpFile locates a markdown file in the cloned repo for a help URL path
 // that isn't in the mkdocs nav. These are disambiguation pages.
-// Returns (navPath, relFilePath, content, ok).
-func findHelpFile(url, repoRoot string) (string, string, string, bool) {
+// Returns (navPath, relFilePath, title, content, ok).
+func findHelpFile(url, repoRoot string) (string, string, string, string, bool) {
 	// The URL is like "language-reference-guide/symbols/iota"
 	// The file would be at "language-reference-guide/docs/symbols/iota.md"
 	// or "language-reference-guide/docs/symbols/iota/index.md"
 	parts := strings.SplitN(url, "/", 2)
 	if len(parts) < 2 {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
 	subsite := parts[0]
 	rest := parts[1]
@@ -387,21 +412,28 @@ func findHelpFile(url, repoRoot string) (string, string, string, bool) {
 	}
 
 	for _, candidate := range candidates {
-		content, err := os.ReadFile(candidate)
+		raw, err := os.ReadFile(candidate)
 		if err != nil {
 			continue
 		}
 		relFile, _ := filepath.Rel(repoRoot, candidate)
 		// Build a synthetic nav path from the URL segments
 		navPath := buildNavPath(url)
-		return navPath, relFile, cleanContent(content), true
+		title, content := extractTitleAndClean(raw)
+		if title == "" {
+			// Use last URL segment as fallback
+			urlParts := strings.Split(url, "/")
+			title = urlParts[len(urlParts)-1]
+		}
+		return navPath, relFile, title, content, true
 	}
 
-	return "", "", "", false
+	return "", "", "", "", false
 }
 
-// cleanContent strips YAML front-matter and converts HTML elements to markdown.
-func cleanContent(raw []byte) string {
+// extractTitleAndClean extracts the h1 title and cleans the content.
+// Returns (title, cleanedContent).
+func extractTitleAndClean(raw []byte) (string, string) {
 	s := string(raw)
 
 	// Strip YAML front-matter
@@ -409,6 +441,16 @@ func cleanContent(raw []byte) string {
 		if end := strings.Index(s[3:], "\n---"); end >= 0 {
 			s = strings.TrimLeft(s[3+end+4:], "\n")
 		}
+	}
+
+	// Extract title from first h1 (markdown or HTML)
+	title := ""
+	if match := mdH1Re.FindStringSubmatch(s); match != nil {
+		title = strings.TrimSpace(match[1])
+	} else if match := h1Re.FindStringSubmatch(s); match != nil {
+		title = strings.TrimSpace(match[1])
+		// Strip any remaining HTML tags from title
+		title = htmlTagRe.ReplaceAllString(title, "")
 	}
 
 	// Remove hidden divs (search keywords)
@@ -437,14 +479,16 @@ func cleanContent(raw []byte) string {
 	// Strip remaining <div> and </div> tags
 	s = divRe.ReplaceAllString(s, "")
 
-	return s
+	return title, s
 }
 
 var (
 	hiddenDivRe = regexp.MustCompile(`(?s)<div[^>]*display:\s*none[^>]*>.*?</div>\s*`)
+	mdH1Re      = regexp.MustCompile(`(?m)^#\s+(.+)$`)
 	h1Re        = regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
 	h2Re        = regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
 	h3Re        = regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`)
+	htmlTagRe   = regexp.MustCompile(`<[^>]+>`)
 	spanRe      = regexp.MustCompile(`</?span[^>]*>`)
 	brRe        = regexp.MustCompile(`<br\s*/?>`)
 	kbdRe       = regexp.MustCompile(`<kbd>(.*?)</kbd>`)
