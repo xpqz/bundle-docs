@@ -109,6 +109,7 @@ docsearch -r <rowid>     # Fetch document by rowid
 | `-d` | `./dyalog-docs.db` | Database path |
 | `-s` | | Search string (use `-` to read from stdin) |
 | `-r` | | Fetch document content by rowid |
+| `-l` | `10` | Maximum number of results |
 
 ### Search priority
 

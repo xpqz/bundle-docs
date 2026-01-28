@@ -19,6 +19,7 @@ func main() {
 	dbPath := flag.String("d", "./dyalog-docs.db", "database path")
 	search := flag.String("s", "", "search string (use '-' to read from stdin)")
 	rowid := flag.Int64("r", 0, "fetch document by rowid")
+	limit := flag.Int("l", 10, "maximum number of results")
 	flag.Parse()
 
 	if *search == "" && *rowid == 0 {
@@ -26,6 +27,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  -d <database>  Database path (default: ./dyalog-docs.db)")
 		fmt.Fprintln(os.Stderr, "  -s <string>    Search string (use '-' to read from stdin)")
 		fmt.Fprintln(os.Stderr, "  -r <rowid>     Fetch document by rowid")
+		fmt.Fprintln(os.Stderr, "  -l <limit>     Maximum number of results (default: 10)")
 		os.Exit(1)
 	}
 
@@ -55,7 +57,7 @@ func main() {
 		log.Fatal("empty search string")
 	}
 
-	searchDocs(db, query)
+	searchDocs(db, query, *limit)
 }
 
 func fetchByRowid(db *sql.DB, rowid int64) {
@@ -70,8 +72,9 @@ func fetchByRowid(db *sql.DB, rowid int64) {
 	fmt.Print(content)
 }
 
-func searchDocs(db *sql.DB, query string) {
+func searchDocs(db *sql.DB, query string, limit int) {
 	seen := make(map[int64]bool)
+	count := 0
 
 	// 1. Exact case-insensitive match on keywords
 	rows, err := db.Query(`
@@ -81,7 +84,10 @@ func searchDocs(db *sql.DB, query string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	printResults(rows, seen)
+	count = printResults(rows, seen, limit, count)
+	if count >= limit {
+		return
+	}
 
 	// 2. FTS search on title
 	rows, err = db.Query(`
@@ -91,7 +97,10 @@ func searchDocs(db *sql.DB, query string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	printResults(rows, seen)
+	count = printResults(rows, seen, limit, count)
+	if count >= limit {
+		return
+	}
 
 	// 3. FTS search on content
 	rows, err = db.Query(`
@@ -101,12 +110,15 @@ func searchDocs(db *sql.DB, query string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	printResults(rows, seen)
+	printResults(rows, seen, limit, count)
 }
 
-func printResults(rows *sql.Rows, seen map[int64]bool) {
+func printResults(rows *sql.Rows, seen map[int64]bool, limit, count int) int {
 	defer rows.Close()
 	for rows.Next() {
+		if count >= limit {
+			break
+		}
 		var rowid int64
 		var title string
 		if err := rows.Scan(&rowid, &title); err != nil {
@@ -117,10 +129,12 @@ func printResults(rows *sql.Rows, seen map[int64]bool) {
 		}
 		seen[rowid] = true
 		fmt.Printf("%d %s\n", rowid, title)
+		count++
 	}
 	if err := rows.Err(); err != nil {
 		log.Fatal(err)
 	}
+	return count
 }
 
 // escapeQuery wraps the query in quotes to handle special characters
