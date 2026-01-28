@@ -81,3 +81,16 @@ A JSON array mapping APL symbols to documentation URL paths:
 - Go 1.24+
 - Git (for cloning the documentation repo)
 - CGO enabled (for sqlite3)
+
+## Releases
+
+Pre-built databases are available on the [Releases page](https://github.com/xpqz/bundle-docs/releases).
+
+To create a new release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+This triggers a GitHub Action that builds the tool, generates the database, and publishes it as a release artifact. You can also trigger a snapshot release manually from the [Actions tab](https://github.com/xpqz/bundle-docs/actions).
