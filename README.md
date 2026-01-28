@@ -57,12 +57,13 @@ CREATE TABLE docs (
     path TEXT PRIMARY KEY,    -- Navigation breadcrumb (e.g. "Core Reference / ... / Index Generator")
     file TEXT NOT NULL,       -- Relative file path in repo
     title TEXT NOT NULL,      -- H1 title extracted from the document
+    keywords TEXT NOT NULL,   -- Search keywords from hidden divs (e.g. "⍳ iota index")
     content TEXT NOT NULL,    -- Markdown content (front-matter stripped, HTML converted)
     exclude INTEGER NOT NULL  -- 1 for disambiguation pages, 0 otherwise
 );
 
 -- FTS5 virtual table for full-text search
-CREATE VIRTUAL TABLE docs_fts USING fts5(path, title, content, content='docs');
+CREATE VIRTUAL TABLE docs_fts USING fts5(path, title, keywords, content, content='docs');
 
 CREATE TABLE help_urls (
     symbol TEXT PRIMARY KEY,  -- APL symbol (e.g. "⍳", ":If")
