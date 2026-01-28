@@ -471,8 +471,9 @@ func extractTitleAndClean(raw []byte) (string, string, string) {
 		keywords = strings.Join(kws, " ")
 	}
 
-	// Remove hidden divs (search keywords)
+	// Remove hidden divs (search keywords) and their comments
 	s = hiddenDivRe.ReplaceAllString(s, "")
+	s = hiddenCommentRe.ReplaceAllString(s, "")
 
 	// Convert <h1>...<h3> to markdown headings
 	s = h1Re.ReplaceAllString(s, "# $1")
@@ -501,7 +502,8 @@ func extractTitleAndClean(raw []byte) (string, string, string) {
 }
 
 var (
-	hiddenDivRe = regexp.MustCompile(`(?s)<div[^>]*display:\s*none[^>]*>(.*?)</div>\s*`)
+	hiddenDivRe     = regexp.MustCompile(`(?s)<div[^>]*display:\s*none[^>]*>(.*?)</div>\s*`)
+	hiddenCommentRe = regexp.MustCompile(`<!--\s*Hidden search keywords\s*-->\s*`)
 	mdH1Re      = regexp.MustCompile(`(?m)^#\s+(.+)$`)
 	h1Re        = regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
 	h2Re        = regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
