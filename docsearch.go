@@ -79,7 +79,7 @@ func searchDocs(db *sql.DB, query string, limit int) {
 	// 1. Exact case-insensitive match on keywords
 	rows, err := db.Query(`
 		SELECT rowid, title FROM docs
-		WHERE keywords LIKE ? COLLATE NOCASE
+		WHERE keywords LIKE ? COLLATE NOCASE AND exclude = 0
 	`, "%"+query+"%")
 	if err != nil {
 		log.Fatal(err)
@@ -91,8 +91,9 @@ func searchDocs(db *sql.DB, query string, limit int) {
 
 	// 2. FTS search on title
 	rows, err = db.Query(`
-		SELECT rowid, title FROM docs_fts
-		WHERE title MATCH ?
+		SELECT f.rowid, f.title FROM docs_fts f
+		JOIN docs d ON f.rowid = d.rowid
+		WHERE f.title MATCH ? AND d.exclude = 0
 	`, escapeQuery(query))
 	if err != nil {
 		log.Fatal(err)
@@ -104,8 +105,9 @@ func searchDocs(db *sql.DB, query string, limit int) {
 
 	// 3. FTS search on content
 	rows, err = db.Query(`
-		SELECT rowid, title FROM docs_fts
-		WHERE content MATCH ?
+		SELECT f.rowid, f.title FROM docs_fts f
+		JOIN docs d ON f.rowid = d.rowid
+		WHERE f.content MATCH ? AND d.exclude = 0
 	`, escapeQuery(query))
 	if err != nil {
 		log.Fatal(err)
