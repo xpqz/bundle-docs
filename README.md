@@ -87,6 +87,62 @@ JOIN docs d ON f.rowid = d.rowid
 WHERE f.docs_fts MATCH 'grade' AND d.exclude = 0;
 ```
 
+## docsearch
+
+A command-line tool for querying the documentation database.
+
+### Building
+
+```bash
+go build -tags "fts5" -o docsearch docsearch.go
+```
+
+### Usage
+
+```bash
+docsearch -s <search>    # Search for a term
+docsearch -r <rowid>     # Fetch document by rowid
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-d` | `./dyalog-docs.db` | Database path |
+| `-s` | | Search string (use `-` to read from stdin) |
+| `-r` | | Fetch document content by rowid |
+
+### Search priority
+
+Results are returned in the following order:
+
+1. Exact case-insensitive match on keywords
+2. FTS match on title
+3. FTS match on content
+
+Duplicates are suppressed; a document appears only once at its highest priority.
+
+### Examples
+
+```bash
+# Search for "iota"
+./docsearch -s "iota"
+86 Index Generator R←⍳Y
+2598 Iota ⍳
+...
+
+# Search for an APL symbol
+./docsearch -s "⍳"
+86 Index Generator R←⍳Y
+87 Index Of R←X⍳Y
+
+# Read search term from stdin
+echo "binomial" | ./docsearch -s -
+
+# Fetch a document by rowid
+./docsearch -r 86
+# Index Generator R←⍳Y
+...
+```
+
 ## symbol-urls.json format
 
 A JSON array mapping APL symbols to documentation URL paths:
