@@ -2,11 +2,12 @@
 // monorepo structure, and produces a sqlite3 database of all markdown
 // content keyed by navigation path.
 //
-//	go build .
+//	go build -tags "fts5" .
 package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,6 +22,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+//go:embed symbol-urls.json
+var embeddedSymbolURLs []byte
+
 // mkdocsConfig represents the parts of mkdocs.yml we care about.
 type mkdocsConfig struct {
 	SiteName string      `yaml:"site_name"`
@@ -28,12 +32,32 @@ type mkdocsConfig struct {
 	Nav      []yaml.Node `yaml:"nav"`
 }
 
+func defaultDBPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "dyalog-docs.db"
+	}
+	return filepath.Join(home, ".bundle-docs", "dyalog-docs.db")
+}
+
 func main() {
-	output := flag.String("o", "dyalog-docs.db", "output database path")
-	repo := flag.String("repo", "git@github.com:Dyalog/documentation.git", "documentation repo URL")
-	helpURLs := flag.String("help-urls", "symbol-urls.json", "path to symbol-urls.json")
+	// Handle "update" subcommand: strip it so flags still work
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	}
+
+	output := flag.String("o", defaultDBPath(), "output database path")
+	repo := flag.String("repo", "https://github.com/Dyalog/documentation.git", "documentation repo URL")
+	helpURLs := flag.String("help-urls", "", "path to symbol-urls.json (uses embedded data if empty)")
 	keep := flag.Bool("keep", false, "keep cloned repo (print path)")
 	flag.Parse()
+
+	// Ensure output directory exists
+	if dir := filepath.Dir(*output); dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Fatalf("creating directory %s: %v", dir, err)
+		}
+	}
 
 	// Clone repo
 	tmpDir, err := os.MkdirTemp("", "dyalog-docs-*")
@@ -138,9 +162,15 @@ func main() {
 		fileIndex[norm] = d.path
 	}
 
-	// Parse help_urls.h and insert mappings
-	if *helpURLs != "" {
-		entries, err := parseSymbolURLs(*helpURLs)
+	// Parse help URLs and insert mappings
+	{
+		var entries []helpURLEntry
+		var err error
+		if *helpURLs != "" {
+			entries, err = parseSymbolURLs(*helpURLs)
+		} else {
+			entries, err = parseSymbolURLsFromBytes(embeddedSymbolURLs)
+		}
 		if err != nil {
 			log.Printf("warning: help_urls: %v", err)
 		} else {
@@ -360,12 +390,16 @@ func parseSymbolURLs(path string) ([]helpURLEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseSymbolURLsFromBytes(data)
+}
+
+func parseSymbolURLsFromBytes(data []byte) ([]helpURLEntry, error) {
 	var raw []struct {
 		Symbol string `json:"symbol"`
 		URL    string `json:"url"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, err
 	}
 	entries := make([]helpURLEntry, len(raw))
 	for i, r := range raw {
