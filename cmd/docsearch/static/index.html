@@ -334,10 +334,10 @@
         return `<span class="${cls}">${esc(b)}</span>`;
       })
       .join('');
-    const heading = (r.heading && r.heading !== r.title)
-      ? ` <span class="result-heading">— ${esc(r.heading)}</span>`
-      : '';
-    const titleText = esc(r.title || '(untitled)') + heading;
+    // Title only - the chunk heading is shown via the snippet and
+    // accessible via expand, so appending it to the title just adds
+    // markdown noise (e.g. "— Variant Options for `⎕FIX`").
+    const titleText = esc(r.title || '(untitled)');
     const titleHTML = r.source_url
       ? `<a class="result-title" href="${esc(r.source_url)}" target="_blank" rel="noopener" title="Open on dyalog.github.io">${titleText}</a>`
       : `<span class="result-title">${titleText}</span>`;

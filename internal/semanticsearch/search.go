@@ -217,15 +217,17 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 	if err := hydrateResults(ctx, db, fused); err != nil {
 		return nil, err
 	}
-	if options.Mode == ModeHybrid {
-		applyCanonicalBonus(fused)
-		sort.Slice(fused, func(i, j int) bool {
-			if fused[i].Score == fused[j].Score {
-				return fused[i].ChunkID < fused[j].ChunkID
-			}
-			return fused[i].Score > fused[j].Score
-		})
-	}
+	// applyBonuses is universal now: the Language Reference boost
+	// for exact APL queries needs to fire in fts-only and vector-only
+	// modes too, otherwise verbatim ⎕FIX still surfaces the release
+	// notes chunk above the canonical reference page.
+	applyBonuses(fused, options.Query)
+	sort.Slice(fused, func(i, j int) bool {
+		if fused[i].Score == fused[j].Score {
+			return fused[i].ChunkID < fused[j].ChunkID
+		}
+		return fused[i].Score > fused[j].Score
+	})
 	if options.DedupeByDocument {
 		fused = dedupeByDocument(fused)
 	}
@@ -262,19 +264,41 @@ func dedupeByDocument(results []SearchResult) []SearchResult {
 // Warning sub-section. The magnitude is tuned as a tiebreaker - large
 // enough to break ties between an FTS#1 hit and an FTS#2 hit on the
 // same page, small enough that a clear vector#1 result still wins.
-// Empirically 0.003 separates Execute ⍎ from a keyword-heavy GUI page
-// without hoisting a deep canonical chunk over a solid vector hit.
 const canonicalChunkBonus = 0.003
 
-func applyCanonicalBonus(results []SearchResult) {
+// languageReferenceBonus is added to chunks under the Language
+// Reference Guide breadcrumb when the query looks like an exact APL
+// glyph, system function, or control word. It ensures a verbatim
+// query like "⎕FIX" surfaces the canonical reference page ahead of
+// release-notes coverage of the same symbol.
+const languageReferenceBonus = 0.005
+
+const languageReferencePrefix = "Core Reference / Dyalog APL Language /"
+
+// applyBonuses adjusts the fused scores after hydration. It handles
+// both the canonical-chunk tiebreaker and the Language Reference
+// boost for exact queries. The Explanation field is annotated so
+// the UI shows which bonuses fired.
+func applyBonuses(results []SearchResult, query string) {
+	exact := looksExact(query)
 	for i := range results {
+		var tags []string
 		if isCanonicalChunk(results[i].Title, results[i].Heading) {
 			results[i].Score += canonicalChunkBonus
-			if results[i].Explanation == "" {
-				results[i].Explanation = "canonical"
-			} else {
-				results[i].Explanation += " + canonical"
-			}
+			tags = append(tags, "canonical")
+		}
+		if exact && strings.HasPrefix(results[i].Path, languageReferencePrefix) {
+			results[i].Score += languageReferenceBonus
+			tags = append(tags, "ref")
+		}
+		if len(tags) == 0 {
+			continue
+		}
+		extra := strings.Join(tags, " + ")
+		if results[i].Explanation == "" {
+			results[i].Explanation = extra
+		} else {
+			results[i].Explanation += " + " + extra
 		}
 	}
 }
@@ -497,9 +521,20 @@ func hydrateResults(ctx context.Context, db *sql.DB, results []SearchResult) err
 		`, results[i].ChunkID).Scan(&results[i].Title, &results[i].Path, &results[i].Heading, &results[i].Snippet); err != nil {
 			return fmt.Errorf("hydrate chunk %d: %w", results[i].ChunkID, err)
 		}
+		// documents.path is the mkdocs nav breadcrumb and sometimes
+		// embeds inline HTML (e.g. "<code>⎕FIX</code>: Fix Script"),
+		// which leaks through both the CLI and the web UI. Strip the
+		// tags so consumers see a plain "⎕FIX: Fix Script".
+		results[i].Path = stripHTMLTags(results[i].Path)
 		results[i].Snippet = compactSnippet(results[i].Snippet, 72)
 	}
 	return nil
+}
+
+var htmlTagRE = regexp.MustCompile(`<[^>]+>`)
+
+func stripHTMLTags(s string) string {
+	return htmlTagRE.ReplaceAllString(s, "")
 }
 
 func FormatResults(results []SearchResult) string {

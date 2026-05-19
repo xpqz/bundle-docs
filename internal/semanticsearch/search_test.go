@@ -203,6 +203,52 @@ func TestHybridSearchPromotesCanonicalChunkOverKeywordHeavySubsection(t *testing
 	}
 }
 
+func TestStripHTMLTagsCleansBreadcrumb(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Core Reference / <code>⎕FIX</code>: Fix Script", "Core Reference / ⎕FIX: Fix Script"},
+		{"plain text", "plain text"},
+		{"<b>bold</b> and <em>em</em>", "bold and em"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := stripHTMLTags(tc.in); got != tc.want {
+			t.Fatalf("stripHTMLTags(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestApplyBonusesBoostsLanguageReferenceForExactQueries(t *testing.T) {
+	// Scores chosen to mirror real FTS rank #1 and #2 (1/61 and 1/62).
+	results := []SearchResult{
+		{ChunkID: 1, Path: "Release Notes / Earlier / v19 / Fix Script", Score: 1.0 / 61.0, Explanation: "fts#1"},
+		{ChunkID: 2, Path: "Core Reference / Dyalog APL Language / System Functions / Fix Script", Score: 1.0 / 62.0, Explanation: "fts#2"},
+	}
+	applyBonuses(results, "⎕FIX")
+
+	if results[0].Score >= results[1].Score {
+		t.Fatalf("exact APL query: Core Reference chunk should outscore Release Notes after bonus.\n  RN=%v  Core=%v", results[0], results[1])
+	}
+	if !strings.Contains(results[1].Explanation, "ref") {
+		t.Fatalf("Core Reference chunk should be tagged 'ref': %q", results[1].Explanation)
+	}
+	if strings.Contains(results[0].Explanation, "ref") {
+		t.Fatalf("Release Notes chunk should not receive 'ref' tag: %q", results[0].Explanation)
+	}
+}
+
+func TestApplyBonusesSkipsLanguageReferenceForNaturalQueries(t *testing.T) {
+	results := []SearchResult{
+		{ChunkID: 1, Path: "Release Notes / Earlier / v19", Score: 0.10, Explanation: "fts#1"},
+		{ChunkID: 2, Path: "Core Reference / Dyalog APL Language / X", Score: 0.10, Explanation: "fts#2"},
+	}
+	applyBonuses(results, "how do I trap errors")
+	for _, r := range results {
+		if strings.Contains(r.Explanation, "ref") {
+			t.Fatalf("natural-language query should not get ref bonus: %#v", r)
+		}
+	}
+}
+
 func TestDedupeByDocumentKeepsFirstChunkPerPath(t *testing.T) {
 	in := []SearchResult{
 		{ChunkID: 1, Path: "A / X", Score: 0.9},
