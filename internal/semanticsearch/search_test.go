@@ -142,6 +142,67 @@ func TestSearchChunksSupportsFTSVectorAndHybridModes(t *testing.T) {
 	}
 }
 
+func TestIsCanonicalChunkTrueWhenHeadingMatchesOrIsContainedInTitle(t *testing.T) {
+	cases := []struct {
+		name    string
+		title   string
+		heading string
+		want    bool
+	}{
+		{"equal", "Execute R←⍎Y", "Execute R←⍎Y", true},
+		{"heading is title prefix", "Fix Script {R}←{X}⎕FIX Y", "Fix Script", true},
+		{"heading inside title", "ExecuteJavaScript Method 839", "Method 839", true},
+		{"sub-section heading", "Execute R←⍎Y", "Examples", false},
+		{"warning sub-section", "Where R←⍸Y", "Restriction", false},
+		{"empty title", "", "Whatever", false},
+		{"empty heading", "Title", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCanonicalChunk(tc.title, tc.heading); got != tc.want {
+				t.Fatalf("isCanonicalChunk(%q, %q) = %v, want %v", tc.title, tc.heading, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHybridSearchPromotesCanonicalChunkOverKeywordHeavySubsection(t *testing.T) {
+	// Reproduces the "execute character vector as code" shape: a
+	// long sub-section chunk wins on vector rank, while the
+	// canonical reference chunk for the relevant primitive sits a
+	// few positions lower. With deep candidate fetch + canonical
+	// bonus, the canonical chunk should land at top-1.
+	db := openSearchDB(t)
+
+	// Canonical Execute reference chunk - heading equals title, terse body.
+	execID := insertSearchChunk(t, db, "Core Reference / Execute", "Execute R←⍎Y", "Execute R←⍎Y",
+		"Warning: untrusted input is risky.", []float32{0.2, 0.9, 0.1})
+	// Long, keyword-rich sub-section on a different page.
+	_ = insertSearchChunk(t, db, "GUI / Character", "Character Input/Output ⍞", "Examples",
+		"Character vector input and output examples with code samples.", []float32{0.1, 1.0, 0.0})
+
+	results, err := SearchChunks(context.Background(), db, queryEmbedder{vector: []float32{0.1, 1.0, 0.0}}, SearchOptions{
+		Query:               "execute character vector as code",
+		Mode:                ModeHybrid,
+		Limit:               5,
+		VectorDims:          3,
+		UseFallbackVectorDB: true,
+	})
+	if err != nil {
+		t.Fatalf("hybrid search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("no hybrid results")
+	}
+	if results[0].ChunkID != execID {
+		t.Fatalf("hybrid top-1 = %d (%q), want canonical Execute chunk %d",
+			results[0].ChunkID, results[0].Heading, execID)
+	}
+	if !strings.Contains(results[0].Explanation, "canonical") {
+		t.Fatalf("top result explanation = %q, want canonical marker", results[0].Explanation)
+	}
+}
+
 func TestFormatResultsIncludesDocumentContextAndCompactSnippet(t *testing.T) {
 	output := FormatResults([]SearchResult{{
 		ChunkID:     42,

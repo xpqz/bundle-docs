@@ -162,11 +162,28 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 		return nil, fmt.Errorf("unknown semantic mode %q", options.Mode)
 	}
 
+	// In hybrid mode on natural-language queries, fetch deeper pools
+	// from each side so RRF has more material to fuse: the canonical
+	// primitive page often sits at FTS rank ~8-10 while the user only
+	// asks for 5 final results, and expanding the per-side pool lets
+	// fusion still see it. For exact-looking APL queries we keep the
+	// tight limit - FTS is authoritative there, and pulling deeper
+	// vector candidates can let a tangentially-related page (e.g. a
+	// ⎕STATE doc that happens to mention ⎕IO) outscore the canonical
+	// fts#1 hit. 50 chosen as a soft cap to keep latency bounded.
+	perSideLimit := options.Limit
+	if options.Mode == ModeHybrid && !looksExact(options.Query) {
+		perSideLimit = options.Limit * 4
+		if perSideLimit > 50 {
+			perSideLimit = 50
+		}
+	}
+
 	var fts []RankedResult
 	var vector []RankedResult
 	var err error
 	if options.Mode == ModeFTS || options.Mode == ModeHybrid {
-		fts, err = searchFTS(ctx, db, options.Query, options.Limit)
+		fts, err = searchFTS(ctx, db, options.Query, perSideLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -175,7 +192,9 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 		if embedder == nil {
 			return nil, fmt.Errorf("embedding service is required for %s mode", options.Mode)
 		}
-		vector, err = searchVector(ctx, db, embedder, options)
+		vectorOptions := options
+		vectorOptions.Limit = perSideLimit
+		vector, err = searchVector(ctx, db, embedder, vectorOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -188,12 +207,65 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 	case ModeVector:
 		fused = rankedToResults(vector, SourceVector, options.Limit)
 	default:
-		fused = FuseResults(fts, vector, WeightsForQuery(options.Query), options.Limit)
+		// Fuse on the deep pools, hydrate to learn each chunk's
+		// title/heading, then apply the canonical-chunk bonus and
+		// re-trim to the caller's limit.
+		fused = FuseResults(fts, vector, WeightsForQuery(options.Query), len(fts)+len(vector))
+		if err := hydrateResults(ctx, db, fused); err != nil {
+			return nil, err
+		}
+		applyCanonicalBonus(fused)
+		sort.Slice(fused, func(i, j int) bool {
+			if fused[i].Score == fused[j].Score {
+				return fused[i].ChunkID < fused[j].ChunkID
+			}
+			return fused[i].Score > fused[j].Score
+		})
+		if len(fused) > options.Limit {
+			fused = fused[:options.Limit]
+		}
+		return fused, nil
 	}
 	if err := hydrateResults(ctx, db, fused); err != nil {
 		return nil, err
 	}
 	return fused, nil
+}
+
+// canonicalChunkBonus is added to the fused score of chunks whose
+// heading is the document's canonical heading (heading equals the
+// title, or the title contains the heading). Those chunks are the
+// reference body of a primitive page rather than an Examples or
+// Warning sub-section. The magnitude is tuned as a tiebreaker - large
+// enough to break ties between an FTS#1 hit and an FTS#2 hit on the
+// same page, small enough that a clear vector#1 result still wins.
+// Empirically 0.003 separates Execute ⍎ from a keyword-heavy GUI page
+// without hoisting a deep canonical chunk over a solid vector hit.
+const canonicalChunkBonus = 0.003
+
+func applyCanonicalBonus(results []SearchResult) {
+	for i := range results {
+		if isCanonicalChunk(results[i].Title, results[i].Heading) {
+			results[i].Score += canonicalChunkBonus
+			if results[i].Explanation == "" {
+				results[i].Explanation = "canonical"
+			} else {
+				results[i].Explanation += " + canonical"
+			}
+		}
+	}
+}
+
+func isCanonicalChunk(title, heading string) bool {
+	title = strings.TrimSpace(title)
+	heading = strings.TrimSpace(heading)
+	if title == "" || heading == "" {
+		return false
+	}
+	if title == heading {
+		return true
+	}
+	return strings.Contains(title, heading)
 }
 
 func searchFTS(ctx context.Context, db *sql.DB, query string, limit int) ([]RankedResult, error) {
