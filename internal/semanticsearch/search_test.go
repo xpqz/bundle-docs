@@ -203,6 +203,47 @@ func TestHybridSearchPromotesCanonicalChunkOverKeywordHeavySubsection(t *testing
 	}
 }
 
+func TestCompactSnippetStripsMarkdownNoise(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "fenced apl code keeps content, drops backticks and lang",
+			in:   "```apl\na←'ab' b←1(220⌶)a\nb ¯33 ¯108 5 0 0 0\n```",
+			want: "a←'ab' b←1(220⌶)a b ¯33 ¯108 5 0 0 0",
+		},
+		{
+			name: "inline code backticks removed",
+			in:   "Use `⎕FIX` to load.",
+			want: "Use ⎕FIX to load.",
+		},
+		{
+			name: "markdown link collapses to anchor text",
+			in:   "See [`⎕VGET`](../system-functions/vget.md) for details.",
+			want: "See ⎕VGET for details.",
+		},
+		{
+			name: "admonition opener stripped",
+			in:   "!!! Warning \"Warning\"\nIf the argument to _execute_ could include user input...",
+			want: "If the argument to execute could include user input...",
+		},
+		{
+			name: "heading hash stripped",
+			in:   "## Examples\nfoo",
+			want: "Examples foo",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := compactSnippet(tc.in, 200); got != tc.want {
+				t.Fatalf("compactSnippet:\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFormatResultsIncludesDocumentContextAndCompactSnippet(t *testing.T) {
 	output := FormatResults([]SearchResult{{
 		ChunkID:     42,

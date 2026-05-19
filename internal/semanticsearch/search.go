@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -491,7 +492,47 @@ func quoteFTS(q string) string {
 	return `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
 }
 
+// markdownFencedBlock removes triple-backtick (or tilde) code fences,
+// including the optional language tag, while keeping the code content.
+var markdownFencedBlock = regexp.MustCompile("(?s)(?:```|~~~)[ \\t]*[A-Za-z0-9_+-]*[ \\t]*\\n?(.*?)\\n?(?:```|~~~)")
+
+// markdownInlineCode strips single-backtick inline code wrappers but
+// keeps the wrapped text.
+var markdownInlineCode = regexp.MustCompile("`([^`]+)`")
+
+// markdownLink matches [text](url) and leaves only text.
+var markdownLink = regexp.MustCompile(`\[([^\]]+)\]\([^)]*\)`)
+
+// markdownBold and markdownItalicUnderscore strip emphasis markers
+// while keeping the wrapped text. We intentionally do not strip plain
+// `*` because APL uses it for power, exponentiation, and signum.
+var (
+	markdownBold             = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+	markdownItalicUnderscore = regexp.MustCompile(`\b_([^_\n]+)_\b`)
+)
+
+// markdownHeading strips leading # markers from headings.
+var markdownHeading = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
+
+// markdownAdmonition strips mkdocs admonition openers from snippets.
+// The leading "!!! warning \"Warning\"" line otherwise dominates the
+// 72-char preview.
+var markdownAdmonition = regexp.MustCompile(`(?m)^\s*!!!\s+\w+(?:\s+"[^"]*")?\s*$`)
+
+// compactSnippet flattens chunk markdown into a single line of plain
+// text suitable for an inline preview: code fences/inline code lose
+// their backticks (keeping the code content), links collapse to their
+// text, emphasis markers and heading hashes are stripped, and
+// admonition openers are removed. Whitespace is then normalised and
+// the result truncated to limit characters with an ellipsis.
 func compactSnippet(s string, limit int) string {
+	s = markdownAdmonition.ReplaceAllString(s, "")
+	s = markdownFencedBlock.ReplaceAllString(s, " $1 ")
+	s = markdownInlineCode.ReplaceAllString(s, "$1")
+	s = markdownLink.ReplaceAllString(s, "$1")
+	s = markdownBold.ReplaceAllString(s, "$1")
+	s = markdownItalicUnderscore.ReplaceAllString(s, "$1")
+	s = markdownHeading.ReplaceAllString(s, "")
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) <= limit {
 		return s

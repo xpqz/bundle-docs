@@ -89,19 +89,23 @@
   }
   .result-title {
     font-size: 15px; font-weight: 600;
-    cursor: pointer;
     color: var(--accent);
+    text-decoration: none;
   }
   .result-title:hover { text-decoration: underline; }
   .result-heading { font-weight: 400; color: var(--fg-muted); }
-  .source-link {
-    font-size: 12px;
+  .expand-toggle {
+    font: 12px sans-serif;
     color: var(--fg-muted);
-    text-decoration: none;
-    margin-left: 8px;
-    white-space: nowrap;
+    background: none;
+    border: none;
+    padding: 0 0 0 4px;
+    margin-left: 4px;
+    cursor: pointer;
   }
-  .source-link:hover { color: var(--accent); text-decoration: underline; }
+  .expand-toggle:hover { color: var(--accent); text-decoration: underline; }
+  .expand-toggle.open::before { content: "▾ "; }
+  .expand-toggle:not(.open)::before { content: "▸ "; }
   .result-meta {
     font-size: 12px; color: var(--fg-faint);
     margin: 4px 0;
@@ -215,7 +219,7 @@
   <div class="hint">
     <strong>fts</strong>: exact match (best for APL glyphs, system names) ·
     <strong>vector</strong>: semantic only ·
-    <strong>hybrid</strong>: both, fused. Click a title to expand the full chunk text.
+    <strong>hybrid</strong>: both, fused. Click a title to open the page on dyalog.github.io, or <em>expand</em> to view the chunk inline.
   </div>
 
   <div id="status"></div>
@@ -261,8 +265,8 @@
       const n = data.results.length;
       statusEl.textContent = `${n} result${n === 1 ? '' : 's'} for "${q}" (${data.mode})`;
       resultsEl.innerHTML = data.results.map(renderResult).join('');
-      document.querySelectorAll('.result-title').forEach(el => {
-        el.addEventListener('click', () => toggleContent(el.dataset.id));
+      document.querySelectorAll('.expand-toggle').forEach(btn => {
+        btn.addEventListener('click', () => toggleContent(btn));
       });
     } catch (err) {
       showError(err.message || 'request failed');
@@ -286,24 +290,29 @@
     const heading = (r.heading && r.heading !== r.title)
       ? ` <span class="result-heading">— ${esc(r.heading)}</span>`
       : '';
-    const link = r.source_url
-      ? ` <a class="source-link" href="${esc(r.source_url)}" target="_blank" rel="noopener" title="Open on dyalog.github.io">↗ open</a>`
-      : '';
+    const titleText = esc(r.title || '(untitled)') + heading;
+    const titleHTML = r.source_url
+      ? `<a class="result-title" href="${esc(r.source_url)}" target="_blank" rel="noopener" title="Open on dyalog.github.io">${titleText}</a>`
+      : `<span class="result-title">${titleText}</span>`;
     return `
       <div class="result">
         <div class="breadcrumb">${esc(r.path || '')}</div>
-        <div class="result-title" data-id="${r.chunk_id}">${esc(r.title || '(untitled)')}${heading}</div>
-        <div class="result-meta">#${r.chunk_id} ${badges}${link}</div>
+        <div>${titleHTML}</div>
+        <div class="result-meta">#${r.chunk_id} ${badges}<button type="button" class="expand-toggle" data-id="${r.chunk_id}" aria-expanded="false">expand</button></div>
         <div class="result-snippet">${esc(r.snippet || '')}</div>
         <div class="result-content" id="content-${r.chunk_id}"></div>
       </div>`;
   }
 
-  async function toggleContent(id) {
+  async function toggleContent(btn) {
+    const id = btn.dataset.id;
     const el = document.getElementById('content-' + id);
     if (!el) return;
     if (el.classList.contains('open')) {
       el.classList.remove('open');
+      btn.classList.remove('open');
+      btn.textContent = 'expand';
+      btn.setAttribute('aria-expanded', 'false');
       return;
     }
     if (!el.dataset.loaded) {
@@ -314,6 +323,9 @@
         if (!resp.ok) {
           el.innerHTML = '<div class="error">' + esc(data.error || resp.statusText) + '</div>';
           el.classList.add('open');
+          btn.classList.add('open');
+          btn.textContent = 'collapse';
+          btn.setAttribute('aria-expanded', 'true');
           return;
         }
         // html is server-rendered by goldmark (trusted local source)
@@ -324,6 +336,9 @@
       }
     }
     el.classList.add('open');
+    btn.classList.add('open');
+    btn.textContent = 'collapse';
+    btn.setAttribute('aria-expanded', 'true');
   }
 
   function esc(s) {
