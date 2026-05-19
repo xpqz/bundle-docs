@@ -262,6 +262,28 @@ func TestApplyBonusesForcesTitleMatchToTopForExactQueries(t *testing.T) {
 	}
 }
 
+func TestApplyBonusesFallsBackToHeadingWhenTitleIsWrong(t *testing.T) {
+	// Real-world case: bundle-docs extracted a bogus title for the
+	// ⎕OR page ("'ORTEST' ⎕FCREATE 1") but the chunker captured the
+	// correct H1 as the chunk heading. Title-match must still fire so
+	// the canonical ⎕OR chunk surfaces.
+	results := []SearchResult{
+		{ChunkID: 1, Title: "'ORTEST' ⎕FCREATE 1", Heading: "Object Representation R←⎕OR Y",
+			Path: "Core Reference / Dyalog APL Language / System Functions / ⎕OR: Object Representation",
+			Score: 0.01},
+		{ChunkID: 2, Title: "Something Else", Heading: "Other",
+			Path: "Core Reference / Dyalog APL Language / Misc",
+			Score: 0.05},
+	}
+	applyBonuses(results, "⎕OR")
+	if results[0].Score <= results[1].Score {
+		t.Fatalf("heading-match should win.\n  ⎕OR=%v  Other=%v", results[0], results[1])
+	}
+	if !strings.Contains(results[0].Explanation, "title") {
+		t.Fatalf("⎕OR chunk should be tagged 'title' (matched via heading): %q", results[0].Explanation)
+	}
+}
+
 func TestApplyBonusesTitleMatchHandlesQuotedQueries(t *testing.T) {
 	results := []SearchResult{
 		{ChunkID: 1, Title: "Namespaces", Heading: "Overview"},

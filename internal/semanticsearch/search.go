@@ -303,9 +303,19 @@ func applyBonuses(results []SearchResult, query string) {
 			results[i].Score += languageReferenceBonus
 			tags = append(tags, "ref")
 		}
-		if exact && queryLower != "" && titleContainsToken(results[i].Title, queryLower) {
-			results[i].Score += titleMatchBonus
-			tags = append(tags, "title")
+		if exact && queryLower != "" {
+			// Title is the document H1 as bundle-docs extracted it,
+			// but that extractor sometimes picks up a code-block line
+			// (e.g. the ⎕OR page is stored with title "'ORTEST'
+			// ⎕FCREATE 1"). The chunker derives the heading directly
+			// from the markdown H1/H2 so it's a more reliable place
+			// to look for a verbatim symbol match. Either source
+			// satisfies the bonus.
+			if titleContainsToken(results[i].Title, queryLower) ||
+				titleContainsToken(results[i].Heading, queryLower) {
+				results[i].Score += titleMatchBonus
+				tags = append(tags, "title")
+			}
 		}
 		if len(tags) == 0 {
 			continue
