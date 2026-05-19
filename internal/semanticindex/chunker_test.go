@@ -107,3 +107,54 @@ func TestDefaultChunkOptionsUsePlannedTokenBudget(t *testing.T) {
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
+
+func TestEmbeddingTextPrependsTitleAndHeading(t *testing.T) {
+	cases := []struct {
+		name    string
+		chunk   MarkdownChunk
+		want    string
+	}{
+		{
+			name: "title and distinct heading both prepended",
+			chunk: MarkdownChunk{
+				DocumentTitle: "Execute R←⍎Y",
+				Heading:       "Examples",
+				Text:          "⍎'2+2'",
+			},
+			want: "Execute R←⍎Y\nExamples\n⍎'2+2'",
+		},
+		{
+			name: "heading omitted when it duplicates the title",
+			chunk: MarkdownChunk{
+				DocumentTitle: "Where R←⍸Y",
+				Heading:       "Where R←⍸Y",
+				Text:          "Classic Edition note.",
+			},
+			want: "Where R←⍸Y\nClassic Edition note.",
+		},
+		{
+			name: "heading omitted when it is a substring of the title",
+			chunk: MarkdownChunk{
+				DocumentTitle: "Fix Script {R}←{X}⎕FIX Y",
+				Heading:       "Fix Script",
+				Text:          "Body.",
+			},
+			want: "Fix Script {R}←{X}⎕FIX Y\nBody.",
+		},
+		{
+			name: "missing title falls back to heading + text",
+			chunk: MarkdownChunk{
+				Heading: "Standalone",
+				Text:    "Body.",
+			},
+			want: "Standalone\nBody.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EmbeddingText(tc.chunk); got != tc.want {
+				t.Fatalf("EmbeddingText = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

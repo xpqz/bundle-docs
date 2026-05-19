@@ -203,12 +203,68 @@ func searchFTS(ctx context.Context, db *sql.DB, query string, limit int) ([]Rank
 		WHERE chunks_fts MATCH ?
 		ORDER BY bm25(chunks_fts), rowid
 		LIMIT ?
-	`, quoteFTS(query), limit)
+	`, ftsMatchExpression(query), limit)
 	if err != nil {
 		return nil, fmt.Errorf("semantic FTS search: %w", err)
 	}
 	defer rows.Close()
 	return scanRanked(rows, SourceFTS)
+}
+
+// ftsMatchExpression builds an FTS5 MATCH expression from the user query.
+//
+// Exact-looking queries (APL glyphs, colon prefixes, quoted phrases) keep
+// phrase matching so that "⎕FIX", ":If", and "⍳" still hit precisely.
+// Natural-language queries are split into significant tokens and OR'd so
+// that a doc whose title contains one of the tokens (e.g. "Execute" or
+// "Where" in a primitive function page) can surface even when the full
+// phrase does not appear anywhere in the corpus.
+func ftsMatchExpression(query string) string {
+	query = strings.TrimSpace(query)
+	if looksExact(query) {
+		return quoteFTS(query)
+	}
+	tokens := significantTokens(query)
+	if len(tokens) <= 1 {
+		return quoteFTS(query)
+	}
+	parts := make([]string, len(tokens))
+	for i, tok := range tokens {
+		parts[i] = quoteFTS(tok)
+	}
+	return strings.Join(parts, " OR ")
+}
+
+// ftsStopwords excludes common English question/connective words that
+// would otherwise dominate bm25 scoring without adding retrieval signal.
+var ftsStopwords = map[string]struct{}{
+	"a": {}, "an": {}, "and": {}, "are": {}, "as": {}, "at": {}, "be": {},
+	"by": {}, "do": {}, "for": {}, "from": {}, "how": {}, "i": {}, "in": {},
+	"is": {}, "it": {}, "of": {}, "on": {}, "or": {}, "the": {}, "this": {},
+	"to": {}, "what": {}, "which": {}, "with": {}, "you": {},
+}
+
+func significantTokens(query string) []string {
+	fields := strings.FieldsFunc(query, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("⍵⍺⎕⍳⍸⍎", r)
+	})
+	seen := make(map[string]struct{}, len(fields))
+	out := make([]string, 0, len(fields))
+	for _, tok := range fields {
+		lower := strings.ToLower(tok)
+		if len(lower) < 2 {
+			continue
+		}
+		if _, stop := ftsStopwords[lower]; stop {
+			continue
+		}
+		if _, dup := seen[lower]; dup {
+			continue
+		}
+		seen[lower] = struct{}{}
+		out = append(out, tok)
+	}
+	return out
 }
 
 func searchVector(ctx context.Context, db *sql.DB, embedder semanticindex.Embedder, options SearchOptions) ([]RankedResult, error) {

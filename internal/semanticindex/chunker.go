@@ -36,6 +36,30 @@ func DefaultChunkOptions() ChunkOptions {
 	return ChunkOptions{MaxTokens: 500}
 }
 
+// EmbeddingText is the string sent to the embedder for a chunk.
+//
+// The chunk body alone is often missing the canonical name of the page
+// (e.g. the body of "Execute R←⍎Y" starts with "!!! Warning" and never
+// mentions the word "execute"). Prepending the document title and the
+// section heading gives the model the symbol and the plain-English name
+// to anchor natural-language queries against. The heading is omitted
+// when it is identical to the title or a substring of it.
+func EmbeddingText(chunk MarkdownChunk) string {
+	var b strings.Builder
+	title := strings.TrimSpace(chunk.DocumentTitle)
+	heading := strings.TrimSpace(chunk.Heading)
+	if title != "" {
+		b.WriteString(title)
+		b.WriteByte('\n')
+	}
+	if heading != "" && heading != title && !strings.Contains(title, heading) {
+		b.WriteString(heading)
+		b.WriteByte('\n')
+	}
+	b.WriteString(chunk.Text)
+	return b.String()
+}
+
 func ChunkMarkdown(doc SourceDocument, options ChunkOptions) []MarkdownChunk {
 	if options.MaxTokens <= 0 {
 		options = DefaultChunkOptions()

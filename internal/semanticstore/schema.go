@@ -89,7 +89,23 @@ func VectorSchemaSQL(cfg VectorConfig) string {
 }
 
 func VectorUpsertSQL() string {
-	return "INSERT OR REPLACE INTO chunk_vec(rowid, embedding) VALUES (?, ?);"
+	// sqlite-vec's vec0 virtual table does not honor ON CONFLICT clauses
+	// (INSERT OR REPLACE fails with UNIQUE constraint on rowid), so callers
+	// must DELETE the existing row first. UpsertChunkVector below wraps
+	// that two-step sequence.
+	return "INSERT INTO chunk_vec(rowid, embedding) VALUES (?, ?);"
+}
+
+// UpsertChunkVector replaces the embedding for a chunk, working around
+// sqlite-vec's lack of ON CONFLICT support on vec0 tables.
+func UpsertChunkVector(db *sql.DB, chunkID int64, embedding string) error {
+	if _, err := db.Exec(`DELETE FROM chunk_vec WHERE rowid = ?`, chunkID); err != nil {
+		return fmt.Errorf("delete previous vector for chunk %d: %w", chunkID, err)
+	}
+	if _, err := db.Exec(VectorUpsertSQL(), chunkID, embedding); err != nil {
+		return fmt.Errorf("insert vector for chunk %d: %w", chunkID, err)
+	}
+	return nil
 }
 
 func LoadVectorExtension(db *sql.DB, path string) error {

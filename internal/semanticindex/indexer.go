@@ -156,7 +156,7 @@ func embedAndStore(ctx context.Context, db *sql.DB, embedder Embedder, chunks []
 		batchChunks := chunks[start:end]
 		texts := make([]string, len(batchChunks))
 		for i, chunk := range batchChunks {
-			texts[i] = chunk.Text
+			texts[i] = EmbeddingText(chunk)
 		}
 		batch, err := embedder.Embed(ctx, texts)
 		if err != nil {
@@ -173,7 +173,7 @@ func embedAndStore(ctx context.Context, db *sql.DB, embedder Embedder, chunks []
 			if err != nil {
 				return err
 			}
-			if _, err := db.Exec(semanticstore.VectorUpsertSQL(), chunkID, encodeVectorJSON(vector)); err != nil {
+			if err := semanticstore.UpsertChunkVector(db, chunkID, encodeVectorJSON(vector)); err != nil {
 				return fmt.Errorf("store vector for chunk %d: %w", chunkID, err)
 			}
 		}

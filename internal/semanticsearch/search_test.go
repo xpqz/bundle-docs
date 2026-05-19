@@ -66,6 +66,27 @@ func TestReciprocalRankFusionIsDeterministicAndExplainable(t *testing.T) {
 	}
 }
 
+func TestFTSMatchExpressionUsesPhraseForExactAndORForNaturalLanguage(t *testing.T) {
+	cases := []struct {
+		name, query, want string
+	}{
+		{"glyph stays a phrase", "⎕FIX", `"⎕FIX"`},
+		{"colon prefix stays a phrase", ":If", `":If"`},
+		{"quoted query stays a phrase", `"namespace"`, `"""namespace"""`},
+		{"natural language OR-tokens", "find where an array equals a value", `"find" OR "where" OR "array" OR "equals" OR "value"`},
+		{"common stopwords dropped", "how do I define a namespace", `"define" OR "namespace"`},
+		{"single significant token stays a phrase", "namespace", `"namespace"`},
+		{"duplicates collapsed", "format format numbers", `"format" OR "numbers"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ftsMatchExpression(tc.query); got != tc.want {
+				t.Fatalf("ftsMatchExpression(%q) = %q, want %q", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestVectorSearchSQLUsesSqliteVecKNNShape(t *testing.T) {
 	sql := VectorSearchSQL()
 	for _, want := range []string{"chunk_vec", "embedding MATCH", "k = ?", "distance"} {

@@ -93,6 +93,36 @@ func TestIndexDatabasePopulatesDocumentsChunksFTSAndVectors(t *testing.T) {
 	}
 }
 
+func TestIndexDatabaseEmbedsTitleAndHeadingWithChunkBody(t *testing.T) {
+	db := openIndexDB(t)
+	seedDocsTable(t, db)
+	// Mimics a primitive function page: the canonical name lives in title
+	// and heading, the body never mentions "Execute". The embedder must
+	// receive all three so vector search can match natural-language
+	// queries against the page.
+	insertDoc(t, db, "Language / Execute", "language/execute.md", "Execute R←⍎Y", "# Execute R←⍎Y\n\nWarning: untrusted input is risky.", false)
+
+	embedder := &fakeEmbedder{}
+	_, err := IndexDatabase(context.Background(), db, embedder, IndexOptions{
+		Chunk:               ChunkOptions{MaxTokens: 80},
+		BatchSize:           10,
+		VectorDims:          3,
+		UseFallbackVectorDB: true,
+	})
+	if err != nil {
+		t.Fatalf("index database: %v", err)
+	}
+	if len(embedder.calls) != 1 || len(embedder.calls[0]) != 1 {
+		t.Fatalf("embedder calls = %#v, want one batch of one text", embedder.calls)
+	}
+	embedded := embedder.calls[0][0]
+	for _, want := range []string{"Execute R←⍎Y", "untrusted input"} {
+		if !strings.Contains(embedded, want) {
+			t.Fatalf("embedded text missing %q:\n%s", want, embedded)
+		}
+	}
+}
+
 func TestIndexDatabaseReportsEmbeddingFailures(t *testing.T) {
 	db := openIndexDB(t)
 	seedDocsTable(t, db)
