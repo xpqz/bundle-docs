@@ -1,5 +1,14 @@
-# Binary
-bundle-docs
+# Binaries
+/bundle-docs
+/docsearch
+/bin/
 
 # Output database
 *.db
+
+# Local Python virtualenv for the semantic embedding server
+.venv/
+**/__pycache__/
+
+# Local Claude Code workspace
+.claude/

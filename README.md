@@ -110,6 +110,9 @@ docsearch -r <rowid>     # Fetch document by rowid
 | `-s` | | Search string (use `-` to read from stdin) |
 | `-r` | | Fetch document content by rowid |
 | `-l` | `10` | Maximum number of results |
+| `-semantic-mode` | (off) | `fts`, `vector`, or `hybrid` (see [Semantic search](#semantic-search)) |
+| `-embedding-url` | `$DOCSEARCH_EMBEDDING_URL` or `http://localhost:8000/embed` | Local embedding server endpoint |
+| `-vector-extension` | `$DOCSEARCH_VECTOR_EXTENSION` or `~/.bundle-docs/vec0.{dylib,so,dll}` | sqlite-vec loadable extension path |
 
 ### Search priority
 
@@ -143,6 +146,89 @@ echo "binomial" | ./docsearch -s -
 # Index Generator R←⍳Y
 ...
 ```
+
+## Semantic search
+
+`docsearch` also supports a semantic search mode that combines FTS5 with vector
+similarity over local embeddings of the documentation. It is built on
+[sqlite-vec](https://github.com/asg017/sqlite-vec) and a small local HTTP
+embedding server.
+
+### Prerequisites
+
+1. Install the sqlite-vec loadable extension into `~/.bundle-docs/`:
+
+   ```bash
+   scripts/install-sqlite-vec.sh
+   # → ~/.bundle-docs/vec0.dylib (macOS) or vec0.so (Linux) or vec0.dll (Windows)
+   ```
+
+   `SQLITE_VEC_VERSION` and `INSTALL_DIR` override the defaults.
+
+2. Install and start the local embedding server:
+
+   ```bash
+   python -m venv .venv && . .venv/bin/activate
+   pip install -r scripts/requirements-embedding-server.txt
+   python scripts/embedding-server.py          # http://127.0.0.1:8000/embed
+   ```
+
+   The default model is `BAAI/bge-small-en-v1.5` (384-dim, English-only). The
+   first call downloads the model into `~/.cache/huggingface`.
+
+### Building the semantic index
+
+After `bundle-docs update` (or any rebuild of `dyalog-docs.db`), populate the
+semantic tables:
+
+```bash
+docsearch semantic-index
+# documents, chunks, chunks_fts, chunk_vec written into the existing DB
+```
+
+Override the conventional paths with `-embedding-url`, `-vector-extension`, or
+the matching environment variables (see below).
+
+### Querying
+
+```bash
+# FTS-only (good for APL glyphs and system names)
+docsearch -s '⎕FIX' -semantic-mode fts
+
+# Vector-only (good for natural-language questions)
+docsearch -s 'how do I define a namespace' -semantic-mode vector
+
+# Hybrid (default; fuses FTS and vector with query-dependent weighting)
+docsearch -s 'namespace reference evaluation' -semantic-mode hybrid
+```
+
+`docsearch -r <chunk_id>` returns the chunk text for any semantic result row.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DOCSEARCH_EMBEDDING_URL` | `http://localhost:8000/embed` | Local embedding server |
+| `DOCSEARCH_VECTOR_EXTENSION` | `~/.bundle-docs/vec0.{dylib,so,dll}` (if present) | sqlite-vec loadable extension path |
+
+CLI flags `-embedding-url`, `-vector-extension`, `-embedding-model`, and
+`-vector-dims` always override the environment.
+
+### Evaluation
+
+A representative query set lives in
+[`docs/evaluation/semantic-search-queries.md`](docs/evaluation/semantic-search-queries.md).
+Run it against any tuning change with:
+
+```bash
+scripts/run-semantic-eval.sh \
+    ~/.bundle-docs/dyalog-docs.db \
+    http://localhost:8000/embed \
+    ~/.bundle-docs/vec0.dylib \
+    hybrid > semantic-eval.txt
+```
+
+The plan and design notes are in [`docs/plans/semantic-search.md`](docs/plans/semantic-search.md).
 
 ## symbol-urls.json format
 

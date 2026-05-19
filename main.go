@@ -230,6 +230,12 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Wrote %s\n", *output)
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Semantic search tables were not (re)built. If you use semantic search,")
+	fmt.Fprintln(os.Stderr, "rebuild the chunk/vector index next, e.g.:")
+	fmt.Fprintln(os.Stderr, "  docsearch semantic-index -embedding-url http://localhost:8000/embed \\")
+	fmt.Fprintln(os.Stderr, "    -vector-extension ~/.bundle-docs/vec0.dylib")
+	fmt.Fprintln(os.Stderr, "See README \"Semantic search\" for prerequisites.")
 }
 
 type docEntry struct {
