@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	_ "embed"
@@ -13,14 +14,28 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer/html"
 
 	"github.com/xpqz/bundle-docs/internal/semanticindex"
 	"github.com/xpqz/bundle-docs/internal/semanticsearch"
 	"github.com/xpqz/bundle-docs/internal/semanticstore"
 )
+
+// dyalogDocsBase is the public host where the Dyalog mkdocs site is
+// published. A chunk's source URL is formed by stripping the leading
+// "<subsite>/docs/" segment and the trailing ".md" from the file path,
+// then prepending this base. The chunk's anchor (a slug derived from
+// its heading) is appended as the URL fragment so the link jumps to
+// the right section.
+const dyalogDocsBase = "https://dyalog.github.io/documentation/20.0"
 
 //go:embed static/index.html
 var indexHTML []byte
@@ -68,6 +83,11 @@ func runServe(args []string) {
 		vectorReady:  vectorReady,
 		embedder:     semanticindex.HTTPEmbeddingClient{URL: *embeddingURL, Model: *embeddingModel},
 		embeddingURL: *embeddingURL,
+		md: goldmark.New(
+			goldmark.WithExtensions(extension.GFM),
+			goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+			goldmark.WithRendererOptions(html.WithUnsafe()),
+		),
 	}
 
 	mux := http.NewServeMux()
@@ -94,6 +114,171 @@ type server struct {
 	vectorReady  bool
 	embedder     semanticindex.Embedder
 	embeddingURL string
+	md           goldmark.Markdown
+}
+
+// sourceURL builds the canonical help.dyalog page URL for a chunk.
+//
+// docs.file looks like
+//
+//	language-reference-guide/docs/primitive-functions/tally.md
+//
+// the published site lives at
+//
+//	https://dyalog.github.io/documentation/20.0/language-reference-guide/primitive-functions/tally
+//
+// so we strip the "/docs/" segment and the ".md" suffix. Empty file
+// returns "" so callers can skip the link in the UI.
+func sourceURL(file, anchor string) string {
+	file = strings.TrimSpace(file)
+	if file == "" {
+		return ""
+	}
+	file = strings.TrimSuffix(file, ".md")
+	if idx := strings.Index(file, "/docs/"); idx >= 0 {
+		file = file[:idx] + file[idx+len("/docs"):]
+	}
+	url := dyalogDocsBase + "/" + strings.TrimPrefix(file, "/")
+	if anchor = strings.TrimSpace(anchor); anchor != "" {
+		url += "#" + anchor
+	}
+	return url
+}
+
+// renderMarkdown converts the chunk text to HTML. mkdocs admonitions
+// are converted to blockquotes so they survive a plain CommonMark
+// renderer, and relative `.md` cross-reference links are rewritten to
+// absolute help.dyalog.com URLs. On failure we fall back to a
+// pre-formatted block of the raw text so the UI still shows something
+// usable. sourceFile is the chunk's docs.file (may be empty for
+// databases without the docs table); when empty, cross-ref rewriting
+// is skipped.
+func (s *server) renderMarkdown(text, sourceFile string) string {
+	if s.md == nil {
+		return "<pre>" + htmlEscape(text) + "</pre>"
+	}
+	var buf bytes.Buffer
+	if err := s.md.Convert([]byte(preprocessAdmonitions(text)), &buf); err != nil {
+		return "<pre>" + htmlEscape(text) + "</pre>"
+	}
+	return rewriteRelativeLinks(buf.String(), sourceFile)
+}
+
+// mdLinkRE finds href="<path>.md" and href="<path>.md#anchor".
+// Non-greedy capture so we don't span across multiple attributes.
+var mdLinkRE = regexp.MustCompile(`href="([^"]+?)\.md(#[^"]*)?"`)
+
+// rewriteRelativeLinks turns relative .md hrefs inside the rendered
+// HTML into absolute help.dyalog.com URLs, computed by resolving the
+// link target against the source file's directory. Absolute URLs are
+// passed through unchanged.
+func rewriteRelativeLinks(htmlStr, sourceFile string) string {
+	if sourceFile == "" {
+		return htmlStr
+	}
+	sourceDir := path.Dir(sourceFile)
+	return mdLinkRE.ReplaceAllStringFunc(htmlStr, func(match string) string {
+		m := mdLinkRE.FindStringSubmatch(match)
+		if m == nil {
+			return match
+		}
+		target := m[1]
+		if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "//") || strings.HasPrefix(target, "mailto:") {
+			return match
+		}
+		resolved := path.Clean(path.Join(sourceDir, target)) + ".md"
+		anchor := ""
+		if len(m) > 2 && m[2] != "" {
+			anchor = strings.TrimPrefix(m[2], "#")
+		}
+		url := sourceURL(resolved, anchor)
+		if url == "" {
+			return match
+		}
+		return `href="` + url + `" target="_blank" rel="noopener"`
+	})
+}
+
+// admonitionRE matches a mkdocs admonition opener like:
+//
+//	!!! note
+//	!!! Warning "Be careful"
+//
+// Capture groups: (1) admonition type, (2) optional explicit title.
+var admonitionRE = regexp.MustCompile(`^!!!\s+(\w+)(?:\s+"([^"]*)")?\s*$`)
+
+// preprocessAdmonitions rewrites mkdocs-style admonitions into plain
+// Markdown blockquotes. The continuation block (indented 4 spaces or a
+// tab) is unindented and prefixed with "> " so it remains part of the
+// quote and is not treated as a code block by CommonMark. A blank line
+// stays inside the blockquote only when another indented line follows;
+// otherwise it terminates the admonition.
+func preprocessAdmonitions(text string) string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	i := 0
+	for i < len(lines) {
+		m := admonitionRE.FindStringSubmatch(lines[i])
+		if m == nil {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+		title := m[2]
+		if title == "" {
+			t := m[1]
+			if len(t) > 0 {
+				title = strings.ToUpper(t[:1]) + t[1:]
+			}
+		}
+		out = append(out, "> **"+title+"**")
+		i++
+		for i < len(lines) {
+			line := lines[i]
+			switch {
+			case strings.HasPrefix(line, "    "):
+				out = append(out, "> "+line[4:])
+				i++
+			case strings.HasPrefix(line, "\t"):
+				out = append(out, "> "+line[1:])
+				i++
+			case strings.TrimSpace(line) == "" && hasMoreIndented(lines, i+1):
+				out = append(out, ">")
+				i++
+			default:
+				// Either a non-indented line or a blank line
+				// with no further indented continuation. Stop
+				// consuming - the outer loop will emit it.
+				goto admonitionDone
+			}
+		}
+	admonitionDone:
+	}
+	return strings.Join(out, "\n")
+}
+
+func hasMoreIndented(lines []string, start int) bool {
+	for j := start; j < len(lines); j++ {
+		line := lines[j]
+		if strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "\t") {
+			return true
+		}
+		if strings.TrimSpace(line) != "" {
+			return false
+		}
+	}
+	return false
+}
+
+func htmlEscape(s string) string {
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&#39;",
+	)
+	return r.Replace(s)
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -161,9 +346,11 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Score       float64 `json:"score"`
 		Source      string  `json:"source"`
 		Explanation string  `json:"explanation"`
+		SourceURL   string  `json:"source_url,omitempty"`
 	}
 	out := make([]item, len(results))
 	for i, r := range results {
+		file, anchor := s.lookupChunkLocation(ctx, r.ChunkID)
 		out[i] = item{
 			ChunkID:     r.ChunkID,
 			Title:       r.Title,
@@ -173,6 +360,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			Score:       r.Score,
 			Source:      string(r.Source),
 			Explanation: r.Explanation,
+			SourceURL:   sourceURL(file, anchor),
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -183,6 +371,24 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// lookupChunkLocation joins chunks → documents → docs to get the
+// repo-relative file path for a chunk. Returns empty strings if the
+// docs row is missing (older databases without the bundle-docs
+// `docs` table will simply omit source_url).
+func (s *server) lookupChunkLocation(ctx context.Context, chunkID int64) (file, anchor string) {
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(src.file, ''), COALESCE(c.anchor, '')
+		FROM chunks c
+		JOIN documents d ON d.id = c.document_id
+		LEFT JOIN docs src ON src.path = d.path
+		WHERE c.id = ?
+	`, chunkID).Scan(&file, &anchor)
+	if err != nil {
+		return "", ""
+	}
+	return file, anchor
+}
+
 func (s *server) handleChunk(w http.ResponseWriter, r *http.Request) {
 	idStr := path.Base(r.URL.Path)
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -190,20 +396,22 @@ func (s *server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid chunk id")
 		return
 	}
-	var out struct {
-		ChunkID int64  `json:"chunk_id"`
-		Title   string `json:"title"`
-		Heading string `json:"heading"`
-		Anchor  string `json:"anchor"`
-		Path    string `json:"path"`
-		Text    string `json:"text"`
-	}
+	var (
+		chunkID int64
+		title   string
+		heading string
+		anchor  string
+		docPath string
+		text    string
+		file    string
+	)
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT c.id, d.title, c.heading, c.anchor, d.path, c.text
+		SELECT c.id, d.title, c.heading, c.anchor, d.path, c.text, COALESCE(src.file, '')
 		FROM chunks c
 		JOIN documents d ON d.id = c.document_id
+		LEFT JOIN docs src ON src.path = d.path
 		WHERE c.id = ?
-	`, id).Scan(&out.ChunkID, &out.Title, &out.Heading, &out.Anchor, &out.Path, &out.Text)
+	`, id).Scan(&chunkID, &title, &heading, &anchor, &docPath, &text, &file)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("chunk %d not found", id))
 		return
@@ -212,7 +420,16 @@ func (s *server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chunk_id":   chunkID,
+		"title":      title,
+		"heading":    heading,
+		"anchor":     anchor,
+		"path":       docPath,
+		"text":       text,
+		"html":       s.renderMarkdown(text, file),
+		"source_url": sourceURL(file, anchor),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
