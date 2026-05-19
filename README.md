@@ -1,14 +1,21 @@
 # bundle-docs
 
-A CLI tool that bundles Dyalog APL documentation into a SQLite database for offline use.
+Offline search over the Dyalog APL documentation. Bundles the upstream
+mkdocs site into a single SQLite database and ships two front-ends:
+
+- **`docsearch`** — CLI for FTS5, semantic (vector), and hybrid search.
+- **`docsearch serve`** — local web UI with live-as-you-type search,
+  rendered chunk previews, and deep links to the live docs.
 
 ## What it does
 
 1. Clones the [Dyalog documentation repository](https://github.com/Dyalog/documentation)
 2. Parses the mkdocs monorepo structure (including nested subsites)
-3. Extracts all markdown content with navigation paths
+3. Extracts all markdown content with navigation paths and H1 titles
 4. Optionally maps APL symbols to their documentation pages
-5. Outputs a SQLite database
+5. Outputs a SQLite database with FTS5; `docsearch semantic-index` then
+   adds chunked markdown, embeddings, and a `sqlite-vec` index for
+   semantic search on top of the same file.
 
 ## Installation
 
@@ -114,15 +121,19 @@ docsearch -r <rowid>     # Fetch document by rowid
 | `-embedding-url` | `$DOCSEARCH_EMBEDDING_URL` or `http://localhost:8000/embed` | Local embedding server endpoint |
 | `-vector-extension` | `$DOCSEARCH_VECTOR_EXTENSION` or `~/.bundle-docs/vec0.{dylib,so,dll}` | sqlite-vec loadable extension path |
 
-### Search priority
+### Search priority (legacy `-s` mode)
 
-Results are returned in the following order:
+Without `-semantic-mode`, `docsearch -s` queries the original `docs` /
+`docs_fts` tables and returns whole documents in the following order:
 
 1. Exact case-insensitive match on keywords
 2. FTS match on title
 3. FTS match on content
 
-Duplicates are suppressed; a document appears only once at its highest priority.
+Duplicates are suppressed; a document appears only once at its highest
+priority. For glyph-aware, semantic, or hybrid retrieval — and for the
+ranking heuristics described below — use `-semantic-mode` (or the web
+UI, which always does).
 
 ### Examples
 
@@ -185,16 +196,25 @@ embedding server.
 
 ### Building the semantic index
 
-After `bundle-docs update` (or any rebuild of `dyalog-docs.db`), populate the
-semantic tables:
+`bundle-docs update` rebuilds `dyalog-docs.db` from the upstream repo;
+it parses the markdown, extracts H1 titles (preferring `<h1>` over
+`# ` to match Dyalog's mkdocs convention, with a fence-aware fallback
+scanner), and writes the `docs` + `docs_fts` tables. The semantic
+tables are not rebuilt automatically — after `update`, run:
 
 ```bash
 docsearch semantic-index
 # documents, chunks, chunks_fts, chunk_vec written into the existing DB
 ```
 
-Override the conventional paths with `-embedding-url`, `-vector-extension`, or
-the matching environment variables (see below).
+Indexing ~3000 documents into ~4800 chunks takes ~2 minutes on Apple
+Silicon (MPS). The embedded text for each chunk includes the document
+title and section heading along with the body, so primitive pages
+with terse bodies (`⎕FIX`, `⎕OR`, `⍳`, ...) match natural-language
+queries against the canonical name.
+
+Override the conventional paths with `-embedding-url`,
+`-vector-extension`, or the matching environment variables (see below).
 
 ### Querying
 
@@ -223,40 +243,106 @@ CLI flags `-embedding-url`, `-vector-extension`, `-embedding-model`, and
 
 ### Web interface
 
-`docsearch serve` exposes the same FTS/vector/hybrid search through a small
-HTTP API and a single-page HTML UI:
+`docsearch serve` exposes the same FTS / vector / hybrid search through
+an HTTP API and a single-page UI:
 
 ```bash
 docsearch serve                         # listens on 127.0.0.1:8080
 docsearch serve -addr 0.0.0.0:9090      # bind elsewhere
 ```
 
+Open <http://127.0.0.1:8080> in a browser.
+
+UI features:
+
+- **Live-as-you-type.** Results refresh ~250ms after the last keystroke.
+  Each request cancels the previous in-flight one via `AbortController`,
+  so slow responses can't overwrite faster newer ones.
+- **Result titles link to the live docs.** Clicking the title opens
+  `https://dyalog.github.io/documentation/20.0/<page>#<anchor>` in a
+  new tab — the chunk's anchor takes you to the exact section.
+- **Expand button** renders the chunk body inline as HTML via
+  [goldmark](https://github.com/yuin/goldmark): code fences, tables,
+  lists, inline code, and mkdocs admonitions (`!!! warning "..."`)
+  all render properly. Relative `.md` cross-references inside the
+  chunk are rewritten to absolute live-docs URLs.
+- **One result per document.** Multiple chunks of the same page are
+  collapsed to the best-scoring one (see Ranking below for the API
+  flag controlling this).
+- **Rank badges** show how each result earned its place
+  (`fts#9 + vector#4 + canonical + ref + title`).
+
 Endpoints:
 
-- `GET /` — embedded search UI
-- `GET /api/search?q=<query>&mode={fts,vector,hybrid}&limit=N` (JSON results)
-- `GET /api/chunk/<id>` (full chunk markdown)
-- `GET /api/health` (extension load status, embedding URL)
+| Method | Path | Returns |
+|---|---|---|
+| GET  | `/` | Embedded HTML UI |
+| GET  | `/api/search?q=&mode=&limit=` | JSON results (`mode` is `fts`/`vector`/`hybrid`, default `hybrid`; `limit` 1-50, default 10) |
+| GET  | `/api/chunk/<id>` | Chunk markdown + rendered HTML + `source_url` |
+| GET  | `/api/health` | `vector_ready`, configured `embedding_url` |
 
-The same `-embedding-url` / `-vector-extension` / `DOCSEARCH_*` defaults
-apply. The server keeps the sqlite-vec connection pinned, so queries are
-serialized; that's fine for single-user local use.
+`/api/search` and `/api/chunk/<id>` both include a `source_url`
+pointing at the upstream `dyalog.github.io` page (with an anchor
+fragment for the section).
+
+The sqlite-vec connection is pinned to one SQL connection per the
+extension's threading requirements, so requests serialize at the DB.
+HTTP handling is concurrent on the Go runtime — fine for single-user
+local development, and the embedding server (FastAPI + uvicorn) does
+its own concurrency control on top.
+
+### How ranking works
+
+The badges next to each result show which signals fired:
+
+- **`fts#N`** — FTS5 (bm25) rank N. Exact-looking queries (APL glyphs,
+  `:` prefixes, quoted strings) use phrase matching; natural-language
+  queries are split into significant tokens combined with OR after
+  English stopwords are dropped.
+- **`vector#N`** — vector cosine-similarity rank N from the
+  sqlite-vec index. The query is embedded with the same model used
+  during indexing (default `BAAI/bge-small-en-v1.5`, 384-dim).
+- **`canonical`** — small additive bonus when the chunk's heading
+  equals (or is contained in) the document title. These chunks are
+  the reference body of a page rather than an Examples or Warning
+  sub-section.
+- **`ref`** — bonus when an exact query lands on a page under
+  `Core Reference / Dyalog APL Language /`, so verbatim glyph or
+  system-function queries prefer the Language Reference Guide over
+  Release Notes coverage of the same symbol.
+- **`title`** — large override bonus when an exact query appears
+  verbatim in the chunk title or heading (case-insensitive). This
+  is what makes `⎕FIX`, `⎕IO`, `⎕OR`, `:If`, `(220⌶)`, `⍳`, etc.
+  reliably land their canonical primitive page at top-1.
+
+Hybrid mode fuses FTS and vector ranks with [reciprocal rank
+fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf),
+then applies the bonuses above, then re-sorts. The per-side pool is
+expanded to up to 50 candidates before fusion so canonical primitive
+pages that sit at FTS rank 8-25 can still surface.
 
 ### Evaluation
 
-A representative query set lives in
+A representative query set spanning exact APL queries, mixed phrases,
+and natural-language questions lives in
 [`docs/evaluation/semantic-search-queries.md`](docs/evaluation/semantic-search-queries.md).
-Run it against any tuning change with:
+The current baseline output is in
+[`docs/evaluation/semantic-eval-tuned.txt`](docs/evaluation/semantic-eval-tuned.txt).
+
+Re-run after any tuning change to compare:
 
 ```bash
 scripts/run-semantic-eval.sh \
     ~/.bundle-docs/dyalog-docs.db \
     http://localhost:8000/embed \
     ~/.bundle-docs/vec0.dylib \
-    hybrid > semantic-eval.txt
+    hybrid > /tmp/semantic-eval.txt
+
+diff docs/evaluation/semantic-eval-tuned.txt /tmp/semantic-eval.txt
 ```
 
-The plan and design notes are in [`docs/plans/semantic-search.md`](docs/plans/semantic-search.md).
+The plan and design notes are in
+[`docs/plans/semantic-search.md`](docs/plans/semantic-search.md).
 
 ## symbol-urls.json format
 
