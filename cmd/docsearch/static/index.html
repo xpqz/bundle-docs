@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>docsearch — Dyalog documentation</title>
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --fg-muted: #666;
+    --fg-faint: #999;
+    --bg: #fefefe;
+    --bg-panel: #f7f7f5;
+    --accent: #2266aa;
+    --border: #e0e0d8;
+    --code-bg: #f0efea;
+    --err-bg: #fdecec;
+    --err-fg: #b00020;
+    --badge-bg: #eee8d5;
+    --badge-fg: #555;
+    --canonical-bg: #d5eecf;
+    --canonical-fg: #2a5a26;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.45;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 20px 80px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+  header h1 {
+    font-size: 18px;
+    margin: 0;
+    font-weight: 600;
+  }
+  header .tagline { color: var(--fg-muted); font-size: 13px; }
+
+  form#search-form {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  input[type=search] {
+    flex: 1; min-width: 280px;
+    padding: 8px 12px;
+    font: 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg);
+  }
+  input[type=search]:focus, select:focus, button:focus, input[type=number]:focus {
+    outline: 2px solid var(--accent); outline-offset: -1px;
+  }
+  select, input[type=number] {
+    padding: 8px 10px;
+    font: 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg);
+  }
+  input[type=number] { width: 70px; }
+  button {
+    padding: 8px 16px; font: 600 14px sans-serif;
+    border: 1px solid var(--accent); background: var(--accent); color: white;
+    border-radius: 4px; cursor: pointer;
+  }
+  button:hover { background: #1a558b; }
+
+  #status {
+    font-size: 13px; color: var(--fg-muted);
+    min-height: 1.5em; margin-bottom: 12px;
+  }
+  .error {
+    background: var(--err-bg); color: var(--err-fg);
+    padding: 10px 12px; border-radius: 4px;
+    border: 1px solid #f4caca;
+    font-size: 13px;
+  }
+  .hint { font-size: 13px; color: var(--fg-muted); margin-bottom: 12px; }
+
+  .result {
+    padding: 14px 0;
+    border-top: 1px solid var(--border);
+  }
+  .result:first-child { border-top: none; padding-top: 0; }
+  .breadcrumb {
+    font-size: 12px; color: var(--fg-faint);
+    margin-bottom: 4px;
+  }
+  .result-title {
+    font-size: 15px; font-weight: 600;
+    cursor: pointer;
+    color: var(--accent);
+  }
+  .result-title:hover { text-decoration: underline; }
+  .result-heading { font-weight: 400; color: var(--fg-muted); }
+  .result-meta {
+    font-size: 12px; color: var(--fg-faint);
+    margin: 4px 0;
+  }
+  .badge {
+    display: inline-block;
+    background: var(--badge-bg); color: var(--badge-fg);
+    font: 11px ui-monospace, monospace;
+    padding: 1px 6px; border-radius: 3px;
+    margin-right: 4px;
+  }
+  .badge.canonical { background: var(--canonical-bg); color: var(--canonical-fg); }
+  .result-snippet {
+    font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--fg);
+    background: var(--bg-panel);
+    padding: 6px 10px; border-radius: 3px;
+    margin-top: 6px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .result-content {
+    display: none;
+    margin-top: 10px;
+    padding: 12px;
+    background: var(--code-bg);
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .result-content.open { display: block; }
+  .result-content pre {
+    margin: 0;
+    font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word;
+    color: var(--fg);
+  }
+  footer {
+    margin-top: 40px;
+    padding-top: 16px; border-top: 1px solid var(--border);
+    font-size: 12px; color: var(--fg-faint);
+  }
+  kbd {
+    font: 11px ui-monospace, monospace;
+    border: 1px solid var(--border); border-bottom-width: 2px;
+    border-radius: 3px; padding: 1px 5px;
+    background: var(--bg-panel);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>docsearch</h1>
+    <span class="tagline">Dyalog APL documentation · FTS + semantic vectors</span>
+  </header>
+
+  <form id="search-form" autocomplete="off">
+    <input type="search" name="q" placeholder="e.g. how do I trap errors, ⎕FIX, :If" autofocus>
+    <select name="mode" title="Search mode">
+      <option value="hybrid">hybrid</option>
+      <option value="fts">fts</option>
+      <option value="vector">vector</option>
+    </select>
+    <input type="number" name="limit" value="10" min="1" max="50" title="Result limit">
+    <button type="submit">search</button>
+  </form>
+
+  <div class="hint">
+    <strong>fts</strong>: exact match (best for APL glyphs, system names) ·
+    <strong>vector</strong>: semantic only ·
+    <strong>hybrid</strong>: both, fused. Click a title to expand the full chunk text.
+  </div>
+
+  <div id="status"></div>
+  <div id="results"></div>
+
+  <footer>
+    Source ranks are shown as <span class="badge">fts#N</span>, <span class="badge">vector#N</span>,
+    <span class="badge canonical">canonical</span> (chunk is a document's primary section).
+  </footer>
+</div>
+
+<script>
+(() => {
+  const form = document.getElementById('search-form');
+  const statusEl = document.getElementById('status');
+  const resultsEl = document.getElementById('results');
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await runSearch();
+  });
+
+  async function runSearch() {
+    const fd = new FormData(form);
+    const q = fd.get('q').trim();
+    if (!q) {
+      statusEl.textContent = '';
+      resultsEl.innerHTML = '';
+      return;
+    }
+    const params = new URLSearchParams({
+      q, mode: fd.get('mode'), limit: fd.get('limit'),
+    });
+    statusEl.textContent = 'searching…';
+    resultsEl.innerHTML = '';
+    try {
+      const resp = await fetch('/api/search?' + params.toString());
+      const data = await resp.json();
+      if (!resp.ok) {
+        showError(data.error || resp.statusText);
+        return;
+      }
+      const n = data.results.length;
+      statusEl.textContent = `${n} result${n === 1 ? '' : 's'} for "${q}" (${data.mode})`;
+      resultsEl.innerHTML = data.results.map(renderResult).join('');
+      document.querySelectorAll('.result-title').forEach(el => {
+        el.addEventListener('click', () => toggleContent(el.dataset.id));
+      });
+    } catch (err) {
+      showError(err.message || 'request failed');
+    }
+  }
+
+  function showError(msg) {
+    statusEl.innerHTML = '';
+    resultsEl.innerHTML = '<div class="error">' + esc(msg) + '</div>';
+  }
+
+  function renderResult(r) {
+    const badges = (r.explanation || '')
+      .split(' + ')
+      .filter(b => b.length > 0)
+      .map(b => {
+        const cls = b === 'canonical' ? 'badge canonical' : 'badge';
+        return `<span class="${cls}">${esc(b)}</span>`;
+      })
+      .join('');
+    const heading = (r.heading && r.heading !== r.title)
+      ? ` <span class="result-heading">— ${esc(r.heading)}</span>`
+      : '';
+    return `
+      <div class="result">
+        <div class="breadcrumb">${esc(r.path || '')}</div>
+        <div class="result-title" data-id="${r.chunk_id}">${esc(r.title || '(untitled)')}${heading}</div>
+        <div class="result-meta">#${r.chunk_id} ${badges}</div>
+        <div class="result-snippet">${esc(r.snippet || '')}</div>
+        <div class="result-content" id="content-${r.chunk_id}"></div>
+      </div>`;
+  }
+
+  async function toggleContent(id) {
+    const el = document.getElementById('content-' + id);
+    if (!el) return;
+    if (el.classList.contains('open')) {
+      el.classList.remove('open');
+      return;
+    }
+    if (!el.dataset.loaded) {
+      el.innerHTML = '<em>loading…</em>';
+      try {
+        const resp = await fetch('/api/chunk/' + id);
+        const data = await resp.json();
+        if (!resp.ok) {
+          el.innerHTML = '<div class="error">' + esc(data.error || resp.statusText) + '</div>';
+          el.classList.add('open');
+          return;
+        }
+        el.innerHTML = '<pre>' + esc(data.text) + '</pre>';
+        el.dataset.loaded = '1';
+      } catch (err) {
+        el.innerHTML = '<div class="error">' + esc(err.message || 'fetch failed') + '</div>';
+      }
+    }
+    el.classList.add('open');
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+  }
+})();
+</script>
+</body>
+</html>

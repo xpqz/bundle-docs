@@ -66,6 +66,9 @@ func main() {
 	if maybeRunSemanticIndex(os.Args) {
 		return
 	}
+	if maybeRunServe(os.Args) {
+		return
+	}
 
 	dbPath := flag.String("d", defaultDBPath(), "database path")
 	search := flag.String("s", "", "search string (use '-' to read from stdin)")

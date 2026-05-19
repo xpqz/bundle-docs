@@ -214,6 +214,27 @@ docsearch -s 'namespace reference evaluation' -semantic-mode hybrid
 CLI flags `-embedding-url`, `-vector-extension`, `-embedding-model`, and
 `-vector-dims` always override the environment.
 
+### Web interface
+
+`docsearch serve` exposes the same FTS/vector/hybrid search through a small
+HTTP API and a single-page HTML UI:
+
+```bash
+docsearch serve                         # listens on 127.0.0.1:8080
+docsearch serve -addr 0.0.0.0:9090      # bind elsewhere
+```
+
+Endpoints:
+
+- `GET /` — embedded search UI
+- `GET /api/search?q=<query>&mode={fts,vector,hybrid}&limit=N` (JSON results)
+- `GET /api/chunk/<id>` (full chunk markdown)
+- `GET /api/health` (extension load status, embedding URL)
+
+The same `-embedding-url` / `-vector-extension` / `DOCSEARCH_*` defaults
+apply. The server keeps the sqlite-vec connection pinned, so queries are
+serialized; that's fine for single-user local use.
+
 ### Evaluation
 
 A representative query set lives in
