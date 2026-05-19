@@ -327,10 +327,11 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	results, err := semanticsearch.SearchChunks(ctx, s.db, s.embedder, semanticsearch.SearchOptions{
-		Query:      q,
-		Mode:       semanticsearch.Mode(mode),
-		Limit:      limit,
-		VectorDims: s.vectorDims,
+		Query:            q,
+		Mode:             semanticsearch.Mode(mode),
+		Limit:            limit,
+		VectorDims:       s.vectorDims,
+		DedupeByDocument: true,
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())

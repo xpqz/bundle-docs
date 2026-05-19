@@ -203,6 +203,62 @@ func TestHybridSearchPromotesCanonicalChunkOverKeywordHeavySubsection(t *testing
 	}
 }
 
+func TestDedupeByDocumentKeepsFirstChunkPerPath(t *testing.T) {
+	in := []SearchResult{
+		{ChunkID: 1, Path: "A / X", Score: 0.9},
+		{ChunkID: 2, Path: "A / X", Score: 0.7}, // dupe of #1
+		{ChunkID: 3, Path: "B / Y", Score: 0.5},
+		{ChunkID: 4, Path: "", Score: 0.4},     // no path - keep
+		{ChunkID: 5, Path: "A / X", Score: 0.3}, // dupe of #1
+	}
+	got := dedupeByDocument(in)
+	wantIDs := []int64{1, 3, 4}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("len = %d, want %d: %#v", len(got), len(wantIDs), got)
+	}
+	for i, id := range wantIDs {
+		if got[i].ChunkID != id {
+			t.Fatalf("got[%d].ChunkID = %d, want %d", i, got[i].ChunkID, id)
+		}
+	}
+}
+
+func TestSearchChunksDedupesByDocumentWhenRequested(t *testing.T) {
+	db := openSearchDB(t)
+	// Two chunks from the same document (same path), one from a
+	// different document. With DedupeByDocument the second chunk of
+	// the dupe page should be dropped.
+	insertSearchChunkAt(t, db, 0, "Lang / Execute", "Execute R←⍎Y", "Execute R←⍎Y",
+		"executing character vectors", []float32{0, 1, 0})
+	insertSearchChunkAt(t, db, 1, "Lang / Execute", "Execute R←⍎Y", "Examples",
+		"⍎'2+2' yields 4", []float32{0.1, 0.95, 0})
+	insertSearchChunkAt(t, db, 0, "Lang / Namespaces", "Namespaces", "Namespaces",
+		"namespaces resolve names", []float32{0.1, 0.1, 0.9})
+
+	options := SearchOptions{
+		Query:               "execute character vector",
+		Mode:                ModeVector,
+		Limit:               5,
+		VectorDims:          3,
+		UseFallbackVectorDB: true,
+		DedupeByDocument:    true,
+	}
+	results, err := SearchChunks(context.Background(), db, queryEmbedder{vector: []float32{0, 1, 0}}, options)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2 after dedup: %#v", len(results), results)
+	}
+	seen := map[string]bool{}
+	for _, r := range results {
+		if seen[r.Path] {
+			t.Fatalf("dedup failed, %q appears twice: %#v", r.Path, results)
+		}
+		seen[r.Path] = true
+	}
+}
+
 func TestCompactSnippetStripsMarkdownNoise(t *testing.T) {
 	cases := []struct {
 		name string
@@ -284,6 +340,32 @@ func openSearchDB(t *testing.T) *sql.DB {
 	}
 	execSearchSQL(t, db, `CREATE TABLE chunk_vec(rowid INTEGER PRIMARY KEY, embedding TEXT NOT NULL)`)
 	return db
+}
+
+func insertSearchChunkAt(t *testing.T, db *sql.DB, ordinal int, path, title, heading, text string, vector []float32) int64 {
+	t.Helper()
+
+	docID, err := semanticstore.UpsertDocument(db, semanticstore.Document{Path: path, Title: title})
+	if err != nil {
+		t.Fatalf("upsert document: %v", err)
+	}
+	chunkID, err := semanticstore.UpsertChunk(db, semanticstore.Chunk{
+		DocumentID:  docID,
+		Ordinal:     ordinal,
+		Heading:     heading,
+		Anchor:      strings.ToLower(strings.ReplaceAll(heading, " ", "-")),
+		Text:        text,
+		ContentHash: text,
+	})
+	if err != nil {
+		t.Fatalf("upsert chunk: %v", err)
+	}
+	execSearchSQL(t, db, `
+		INSERT INTO chunks_fts(rowid, title, heading, text)
+		VALUES (?, ?, ?, ?)
+	`, chunkID, title, heading, text)
+	execSearchSQL(t, db, semanticstore.VectorUpsertSQL(), chunkID, encodeVectorForTest(vector))
+	return chunkID
 }
 
 func insertSearchChunk(t *testing.T, db *sql.DB, path, title, heading, text string, vector []float32) int64 {

@@ -44,6 +44,10 @@ type SearchOptions struct {
 	Limit               int
 	VectorDims          int
 	UseFallbackVectorDB bool
+	// DedupeByDocument keeps only the highest-scoring chunk per
+	// documents.path. Useful for UIs that want one row per page;
+	// the eval workflow wants every chunk so this is opt-in.
+	DedupeByDocument bool
 }
 
 type RankedResult struct {
@@ -163,17 +167,16 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 		return nil, fmt.Errorf("unknown semantic mode %q", options.Mode)
 	}
 
-	// In hybrid mode on natural-language queries, fetch deeper pools
-	// from each side so RRF has more material to fuse: the canonical
-	// primitive page often sits at FTS rank ~8-10 while the user only
-	// asks for 5 final results, and expanding the per-side pool lets
-	// fusion still see it. For exact-looking APL queries we keep the
-	// tight limit - FTS is authoritative there, and pulling deeper
-	// vector candidates can let a tangentially-related page (e.g. a
-	// ⎕STATE doc that happens to mention ⎕IO) outscore the canonical
-	// fts#1 hit. 50 chosen as a soft cap to keep latency bounded.
+	// Fetch deeper per-side pools when we need RRF to see lower-ranked
+	// canonical matches (hybrid on natural-language queries) or when
+	// we are about to collapse chunks to one-per-document (dedupe
+	// often discards 4-6 of the top results). 50 is a soft cap to
+	// keep latency bounded. Exact-looking APL queries in hybrid mode
+	// keep the tight limit because FTS is authoritative there and
+	// pulling deeper vector candidates can let a tangentially-related
+	// page (e.g. a ⎕STATE doc that mentions ⎕IO) outscore fts#1.
 	perSideLimit := options.Limit
-	if options.Mode == ModeHybrid && !looksExact(options.Query) {
+	if options.DedupeByDocument || (options.Mode == ModeHybrid && !looksExact(options.Query)) {
 		perSideLimit = options.Limit * 4
 		if perSideLimit > 50 {
 			perSideLimit = 50
@@ -204,17 +207,17 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 	var fused []SearchResult
 	switch options.Mode {
 	case ModeFTS:
-		fused = rankedToResults(fts, SourceFTS, options.Limit)
+		fused = rankedToResults(fts, SourceFTS, perSideLimit)
 	case ModeVector:
-		fused = rankedToResults(vector, SourceVector, options.Limit)
+		fused = rankedToResults(vector, SourceVector, perSideLimit)
 	default:
-		// Fuse on the deep pools, hydrate to learn each chunk's
-		// title/heading, then apply the canonical-chunk bonus and
-		// re-trim to the caller's limit.
+		// Fuse on the deep pools so the canonical chunks can compete.
 		fused = FuseResults(fts, vector, WeightsForQuery(options.Query), len(fts)+len(vector))
-		if err := hydrateResults(ctx, db, fused); err != nil {
-			return nil, err
-		}
+	}
+	if err := hydrateResults(ctx, db, fused); err != nil {
+		return nil, err
+	}
+	if options.Mode == ModeHybrid {
 		applyCanonicalBonus(fused)
 		sort.Slice(fused, func(i, j int) bool {
 			if fused[i].Score == fused[j].Score {
@@ -222,15 +225,34 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 			}
 			return fused[i].Score > fused[j].Score
 		})
-		if len(fused) > options.Limit {
-			fused = fused[:options.Limit]
-		}
-		return fused, nil
 	}
-	if err := hydrateResults(ctx, db, fused); err != nil {
-		return nil, err
+	if options.DedupeByDocument {
+		fused = dedupeByDocument(fused)
+	}
+	if len(fused) > options.Limit {
+		fused = fused[:options.Limit]
 	}
 	return fused, nil
+}
+
+// dedupeByDocument keeps the first occurrence of each documents.path
+// (the navigation breadcrumb), which after sort is the highest-scoring
+// chunk for that document. Order is preserved otherwise.
+func dedupeByDocument(results []SearchResult) []SearchResult {
+	seen := make(map[string]struct{}, len(results))
+	out := make([]SearchResult, 0, len(results))
+	for _, r := range results {
+		if r.Path == "" {
+			out = append(out, r)
+			continue
+		}
+		if _, dup := seen[r.Path]; dup {
+			continue
+		}
+		seen[r.Path] = struct{}{}
+		out = append(out, r)
+	}
+	return out
 }
 
 // canonicalChunkBonus is added to the fused score of chunks whose

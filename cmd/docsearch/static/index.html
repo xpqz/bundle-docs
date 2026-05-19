@@ -298,7 +298,7 @@
       <div class="result">
         <div class="breadcrumb">${esc(r.path || '')}</div>
         <div>${titleHTML}</div>
-        <div class="result-meta">#${r.chunk_id} ${badges}<button type="button" class="expand-toggle" data-id="${r.chunk_id}" aria-expanded="false">expand</button></div>
+        <div class="result-meta">${badges}<button type="button" class="expand-toggle" data-id="${r.chunk_id}" aria-expanded="false">expand</button></div>
         <div class="result-snippet">${esc(r.snippet || '')}</div>
         <div class="result-content" id="content-${r.chunk_id}"></div>
       </div>`;
