@@ -475,6 +475,54 @@ func findHelpFile(url, repoRoot string) (string, string, string, string, string,
 	return "", "", "", "", "", false
 }
 
+// extractMarkdownH1 returns the text of the first Markdown H1 ("# ...")
+// in s, ignoring lines inside fenced code blocks. Returns "" if no
+// Markdown H1 is found.
+//
+// We do not use a CommonMark parser here. goldmark (and any spec-
+// compliant parser) treats lines like `<h2 class="example">Examples</h2>`
+// as a "type 7 HTML block" that continues until the next blank line,
+// which swallows the immediately-following ``` fence opener and leaves
+// `ABC\n===` inside what should be a code block exposed as a Setext H1.
+// A simple line scanner with fence tracking is more accurate for the
+// Dyalog mkdocs corpus, which interleaves HTML and code blocks without
+// separating blank lines.
+//
+// The previous regex `(?m)^#\s+(.+)$` had a different bug: \s matches
+// newlines, so a bare "#" line followed by an indented continuation
+// line could capture the indented line as the title (this is how the
+// ⎕OR page got titled "'ORTEST' ⎕FCREATE 1").
+func extractMarkdownH1(s string) string {
+	inFence := false
+	fenceMarker := ""
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if inFence {
+			if strings.HasPrefix(trimmed, fenceMarker) {
+				inFence = false
+				fenceMarker = ""
+			}
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "```"):
+			inFence = true
+			fenceMarker = "```"
+			continue
+		case strings.HasPrefix(trimmed, "~~~"):
+			inFence = true
+			fenceMarker = "~~~"
+			continue
+		}
+		// "#" followed by a space or tab, then heading text on the
+		// same line. Reject "##" and deeper.
+		if len(trimmed) >= 3 && trimmed[0] == '#' && trimmed[1] != '#' && (trimmed[1] == ' ' || trimmed[1] == '\t') {
+			return strings.TrimSpace(trimmed[1:])
+		}
+	}
+	return ""
+}
+
 // extractTitleAndClean extracts the h1 title, keywords from hidden divs, and cleans the content.
 // Returns (title, keywords, cleanedContent).
 func extractTitleAndClean(raw []byte) (string, string, string) {
@@ -487,14 +535,18 @@ func extractTitleAndClean(raw []byte) (string, string, string) {
 		}
 	}
 
-	// Extract title from first h1 (markdown or HTML)
+	// Extract title from the first H1. The Dyalog docs almost
+	// universally use <h1 class="heading">...</h1> as their title
+	// (3043 of 3090 markdown files), so check HTML first. Markdown
+	// "# " is a fallback for the handful of pages that use it.
 	title := ""
-	if match := mdH1Re.FindStringSubmatch(s); match != nil {
+	if match := h1Re.FindStringSubmatch(s); match != nil {
 		title = strings.TrimSpace(match[1])
-	} else if match := h1Re.FindStringSubmatch(s); match != nil {
-		title = strings.TrimSpace(match[1])
-		// Strip any remaining HTML tags from title
+		// Strip any remaining HTML tags from title (e.g. nested <span>).
 		title = htmlTagRe.ReplaceAllString(title, "")
+	}
+	if title == "" {
+		title = extractMarkdownH1(s)
 	}
 
 	// Extract keywords from hidden divs before removing them
@@ -544,7 +596,6 @@ func extractTitleAndClean(raw []byte) (string, string, string) {
 var (
 	hiddenDivRe     = regexp.MustCompile(`(?s)<div[^>]*display:\s*none[^>]*>(.*?)</div>\s*`)
 	hiddenCommentRe = regexp.MustCompile(`<!--\s*Hidden search keywords\s*-->\s*`)
-	mdH1Re      = regexp.MustCompile(`(?m)^#\s+(.+)$`)
 	h1Re        = regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
 	h2Re        = regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
 	h3Re        = regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`)
