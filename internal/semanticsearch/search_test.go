@@ -236,6 +236,53 @@ func TestApplyBonusesBoostsLanguageReferenceForExactQueries(t *testing.T) {
 	}
 }
 
+func TestApplyBonusesForcesTitleMatchToTopForExactQueries(t *testing.T) {
+	// Reproduces the ⎕IO failure: ⎕STATE is also under Core Reference
+	// and ranks high in both FTS and vector for ⎕IO queries, so it
+	// can outscore the canonical ⎕IO chunk without an explicit title-
+	// match override.
+	results := []SearchResult{
+		{ChunkID: 1, Title: "State of Object R←⎕STATE Y", Heading: "Example",
+			Path: "Core Reference / Dyalog APL Language / System Functions / ⎕STATE: State of Object",
+			Score: 0.04},
+		{ChunkID: 2, Title: "Index Origin ⎕IO", Heading: "Index Origin ⎕IO",
+			Path: "Core Reference / Dyalog APL Language / System Functions / ⎕IO: Index Origin",
+			Score: 0.03},
+	}
+	applyBonuses(results, "⎕IO")
+
+	if results[1].Score <= results[0].Score {
+		t.Fatalf("title-match should win.\n  STATE=%v  IO=%v", results[0], results[1])
+	}
+	if !strings.Contains(results[1].Explanation, "title") {
+		t.Fatalf("⎕IO chunk should be tagged 'title': %q", results[1].Explanation)
+	}
+	if strings.Contains(results[0].Explanation, "title") {
+		t.Fatalf("⎕STATE chunk must not get title bonus for ⎕IO query: %q", results[0].Explanation)
+	}
+}
+
+func TestApplyBonusesTitleMatchHandlesQuotedQueries(t *testing.T) {
+	results := []SearchResult{
+		{ChunkID: 1, Title: "Namespaces", Heading: "Overview"},
+		{ChunkID: 2, Title: "Other", Heading: "Other"},
+	}
+	applyBonuses(results, `"namespace"`)
+	if !strings.Contains(results[0].Explanation, "title") {
+		t.Fatalf("quoted query should still title-match: %q", results[0].Explanation)
+	}
+}
+
+func TestApplyBonusesSkipsTitleMatchForNaturalQueries(t *testing.T) {
+	results := []SearchResult{
+		{ChunkID: 1, Title: "Format Date-time", Heading: "Examples"},
+	}
+	applyBonuses(results, "format numbers as text")
+	if strings.Contains(results[0].Explanation, "title") {
+		t.Fatalf("natural-language query must not trigger title-match: %q", results[0].Explanation)
+	}
+}
+
 func TestApplyBonusesSkipsLanguageReferenceForNaturalQueries(t *testing.T) {
 	results := []SearchResult{
 		{ChunkID: 1, Path: "Release Notes / Earlier / v19", Score: 0.10, Explanation: "fts#1"},

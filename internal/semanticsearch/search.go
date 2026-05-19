@@ -167,16 +167,15 @@ func SearchChunks(ctx context.Context, db *sql.DB, embedder semanticindex.Embedd
 		return nil, fmt.Errorf("unknown semantic mode %q", options.Mode)
 	}
 
-	// Fetch deeper per-side pools when we need RRF to see lower-ranked
-	// canonical matches (hybrid on natural-language queries) or when
-	// we are about to collapse chunks to one-per-document (dedupe
-	// often discards 4-6 of the top results). 50 is a soft cap to
-	// keep latency bounded. Exact-looking APL queries in hybrid mode
-	// keep the tight limit because FTS is authoritative there and
-	// pulling deeper vector candidates can let a tangentially-related
-	// page (e.g. a ⎕STATE doc that mentions ⎕IO) outscore fts#1.
+	// Fetch deeper per-side pools when fusion or dedup might otherwise
+	// hide a canonical chunk that sits past the caller's limit
+	// (canonical primitive pages routinely land at FTS rank 8-25). 50
+	// is a soft cap to keep latency bounded. The verbatim title-match
+	// bonus in applyBonuses takes care of the prior ⎕IO-vs-⎕STATE
+	// regression, so the expansion gate no longer needs to special-
+	// case exact APL queries.
 	perSideLimit := options.Limit
-	if options.DedupeByDocument || (options.Mode == ModeHybrid && !looksExact(options.Query)) {
+	if options.DedupeByDocument || options.Mode == ModeHybrid {
 		perSideLimit = options.Limit * 4
 		if perSideLimit > 50 {
 			perSideLimit = 50
@@ -273,14 +272,27 @@ const canonicalChunkBonus = 0.003
 // release-notes coverage of the same symbol.
 const languageReferenceBonus = 0.005
 
+// titleMatchBonus is applied when an exact-looking query token
+// appears verbatim in the chunk title (case-insensitive). The
+// magnitude is intentionally large - roughly an order of magnitude
+// above any plausible RRF score - so a title-match chunk cannot be
+// outscored by a same-path chunk that merely mentions the symbol in
+// its body. Without this, searching "⎕IO" can surface a ⎕STATE
+// example chunk that ranks high in both FTS and vector and happens
+// to share the Core Reference breadcrumb.
+const titleMatchBonus = 1.0
+
 const languageReferencePrefix = "Core Reference / Dyalog APL Language /"
 
 // applyBonuses adjusts the fused scores after hydration. It handles
-// both the canonical-chunk tiebreaker and the Language Reference
-// boost for exact queries. The Explanation field is annotated so
-// the UI shows which bonuses fired.
+// the canonical-chunk tiebreaker, the Language Reference path
+// preference, and the verbatim-title-match override for exact
+// queries. The Explanation field is annotated so the UI shows which
+// bonuses fired.
 func applyBonuses(results []SearchResult, query string) {
 	exact := looksExact(query)
+	queryToken := exactQueryToken(query)
+	queryLower := strings.ToLower(queryToken)
 	for i := range results {
 		var tags []string
 		if isCanonicalChunk(results[i].Title, results[i].Heading) {
@@ -290,6 +302,10 @@ func applyBonuses(results []SearchResult, query string) {
 		if exact && strings.HasPrefix(results[i].Path, languageReferencePrefix) {
 			results[i].Score += languageReferenceBonus
 			tags = append(tags, "ref")
+		}
+		if exact && queryLower != "" && titleContainsToken(results[i].Title, queryLower) {
+			results[i].Score += titleMatchBonus
+			tags = append(tags, "title")
 		}
 		if len(tags) == 0 {
 			continue
@@ -301,6 +317,21 @@ func applyBonuses(results []SearchResult, query string) {
 			results[i].Explanation += " + " + extra
 		}
 	}
+}
+
+// exactQueryToken returns the value to look for in titles for the
+// title-match bonus. Outer quotes are stripped so a query like
+// `"namespace"` matches a title containing "namespace".
+func exactQueryToken(query string) string {
+	q := strings.TrimSpace(query)
+	if len(q) >= 2 && strings.HasPrefix(q, `"`) && strings.HasSuffix(q, `"`) {
+		q = q[1 : len(q)-1]
+	}
+	return q
+}
+
+func titleContainsToken(title, queryLower string) bool {
+	return strings.Contains(strings.ToLower(title), queryLower)
 }
 
 func isCanonicalChunk(title, heading string) bool {
