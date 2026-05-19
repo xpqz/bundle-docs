@@ -173,6 +173,13 @@ embedding server.
    python scripts/embedding-server.py          # http://127.0.0.1:8000/embed
    ```
 
+   The server is FastAPI + uvicorn (the underlying PyTorch model isn't
+   safe to run concurrently on MPS, but HTTP handling is async so the
+   live-search loop doesn't block at the socket). Endpoints:
+   `POST /embed` for the inference contract, `GET /healthz` for
+   liveness, `GET /readyz` for readiness (200 once the model has
+   loaded).
+
    The default model is `BAAI/bge-small-en-v1.5` (384-dim, English-only). The
    first call downloads the model into `~/.cache/huggingface`.
 
