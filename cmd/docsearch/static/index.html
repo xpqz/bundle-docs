@@ -217,6 +217,7 @@
   </form>
 
   <div class="hint">
+    Results update as you type.
     <strong>fts</strong>: exact match (best for APL glyphs, system names) ·
     <strong>vector</strong>: semantic only ·
     <strong>hybrid</strong>: both, fused. Click a title to open the page on dyalog.github.io, or <em>expand</em> to view the chunk inline.
@@ -236,28 +237,73 @@
   const form = document.getElementById('search-form');
   const statusEl = document.getElementById('status');
   const resultsEl = document.getElementById('results');
+  const queryInput = form.querySelector('input[type=search]');
+  const modeSelect = form.querySelector('select[name=mode]');
+  const limitInput = form.querySelector('input[name=limit]');
 
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    await runSearch();
+  const DEBOUNCE_MS = 250;
+  const MIN_LIVE_QUERY_LENGTH = 2;
+  let debounceTimer = null;
+  let currentController = null;
+
+  // Fire on every input change, but debounced and only past the
+  // minimum length. Mode/limit changes also re-search if the box
+  // has content.
+  queryInput.addEventListener('input', scheduleLiveSearch);
+  modeSelect.addEventListener('change', () => {
+    if (queryInput.value.trim().length >= MIN_LIVE_QUERY_LENGTH) {
+      scheduleLiveSearch(true);
+    }
+  });
+  limitInput.addEventListener('change', () => {
+    if (queryInput.value.trim().length >= MIN_LIVE_QUERY_LENGTH) {
+      scheduleLiveSearch(true);
+    }
   });
 
+  // Enter / explicit submit forces an immediate search even at
+  // 1 char, bypassing debounce.
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    clearTimeout(debounceTimer);
+    runSearch();
+  });
+
+  function scheduleLiveSearch(immediate) {
+    clearTimeout(debounceTimer);
+    const q = queryInput.value.trim();
+    if (q.length < MIN_LIVE_QUERY_LENGTH) {
+      // Empty / too short: cancel any in-flight search and clear.
+      if (currentController) currentController.abort();
+      statusEl.textContent = '';
+      resultsEl.innerHTML = '';
+      return;
+    }
+    debounceTimer = setTimeout(runSearch, immediate ? 0 : DEBOUNCE_MS);
+  }
+
   async function runSearch() {
-    const fd = new FormData(form);
-    const q = fd.get('q').trim();
+    const q = queryInput.value.trim();
     if (!q) {
       statusEl.textContent = '';
       resultsEl.innerHTML = '';
       return;
     }
+
+    // Cancel any in-flight request - the previous response would
+    // otherwise overwrite the newer one if it arrived late.
+    if (currentController) currentController.abort();
+    const myController = new AbortController();
+    currentController = myController;
+
     const params = new URLSearchParams({
-      q, mode: fd.get('mode'), limit: fd.get('limit'),
+      q, mode: modeSelect.value, limit: limitInput.value,
     });
     statusEl.textContent = 'searching…';
-    resultsEl.innerHTML = '';
     try {
-      const resp = await fetch('/api/search?' + params.toString());
+      const resp = await fetch('/api/search?' + params.toString(), { signal: myController.signal });
       const data = await resp.json();
+      if (myController.signal.aborted) return;
       if (!resp.ok) {
         showError(data.error || resp.statusText);
         return;
@@ -269,6 +315,7 @@
         btn.addEventListener('click', () => toggleContent(btn));
       });
     } catch (err) {
+      if (err.name === 'AbortError') return;
       showError(err.message || 'request failed');
     }
   }
