@@ -1,4 +1,4 @@
-//go:build fts5
+//go:build semantic
 
 package main
 
@@ -14,7 +14,7 @@ import (
 
 func TestSemanticIndexCommandIsDocumentedInHelp(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "docsearch")
-	build := exec.Command("go", "build", "-tags", "fts5", "-o", exe, ".")
+	build := exec.Command("go", "build", "-tags", "fts5 semantic", "-o", exe, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build docsearch: %v\n%s", err, out)
@@ -35,7 +35,7 @@ func TestSemanticIndexCommandIsDocumentedInHelp(t *testing.T) {
 
 func TestSemanticIndexCommandRequiresVectorExtension(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "docsearch")
-	build := exec.Command("go", "build", "-tags", "fts5", "-o", exe, ".")
+	build := exec.Command("go", "build", "-tags", "fts5 semantic", "-o", exe, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build docsearch: %v\n%s", err, out)
@@ -57,7 +57,7 @@ func TestSemanticIndexCommandRequiresVectorExtension(t *testing.T) {
 
 func TestSemanticIndexCommandUsesEnvVarForVectorExtension(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "docsearch")
-	build := exec.Command("go", "build", "-tags", "fts5", "-o", exe, ".")
+	build := exec.Command("go", "build", "-tags", "fts5 semantic", "-o", exe, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build docsearch: %v\n%s", err, out)

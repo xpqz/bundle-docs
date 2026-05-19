@@ -23,11 +23,19 @@ mkdocs site into a single SQLite database and ships two front-ends:
 go install github.com/xpqz/bundle-docs@latest
 ```
 
-Or build from source (requires FTS5 build tag for full-text search):
+Or build from source. The project has two independent build tags:
 
-```bash
-go build -tags "fts5" .
-```
+| Build command | What you get | Binary size (docsearch) |
+|---|---|---|
+| `go build -tags "fts5" ./...` | bundle-docs + docsearch with FTS5 search only | ~7 MB |
+| `go build -tags "fts5 semantic" ./...` | …plus `docsearch semantic-index`, `docsearch serve`, vector/hybrid search | ~15 MB |
+
+The `fts5` tag enables SQLite's FTS5 module in `mattn/go-sqlite3` and
+is required for any useful search (both the legacy `docs_fts` query
+and the semantic chunk index use it). The `semantic` tag adds the
+chunking, embedding, sqlite-vec, and web-UI machinery on top —
+including the `goldmark` dependency for rendering chunk markdown.
+Building without `semantic` cleanly omits all that code.
 
 ## Usage
 
@@ -101,7 +109,11 @@ A command-line tool for querying the documentation database.
 ### Building
 
 ```bash
-go build -tags "fts5" -o docsearch docsearch.go
+# Legacy FTS5 search only:
+go build -tags "fts5" -o docsearch ./cmd/docsearch
+
+# Add semantic search (chunked index, vector/hybrid, web UI):
+go build -tags "fts5 semantic" -o docsearch ./cmd/docsearch
 ```
 
 ### Usage
@@ -164,6 +176,11 @@ echo "binomial" | ./docsearch -s -
 similarity over local embeddings of the documentation. It is built on
 [sqlite-vec](https://github.com/asg017/sqlite-vec) and a small local HTTP
 embedding server.
+
+This is an opt-in feature: the build needs `-tags "fts5 semantic"`. The
+default `-tags fts5` build omits the chunking, embedding, vector,
+and web-UI code paths entirely, so the binary stays small and pulls
+no extra Go dependencies (`goldmark`).
 
 ### Prerequisites
 
