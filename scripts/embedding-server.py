@@ -27,7 +27,6 @@ connection management overlap with inference; this is the real win
 over the previous stdlib HTTPServer, which serialized everything down
 to the listening socket.
 """
-from __future__ import annotations
 
 import argparse
 import asyncio
@@ -37,15 +36,24 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from threading import Lock
-from typing import Optional
+from typing import Annotated, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+
+# Hard caps on /embed input. The semantic indexer batches 32 chunks
+# of <500 tokens (roughly 2-3 KB each), so these limits sit
+# comfortably above legitimate traffic while preventing a
+# compromised caller from sending 10000 x 100 KB texts and exhausting
+# memory or inference time.
+MAX_TEXTS_PER_REQUEST = 64
+MAX_TEXT_BYTES = 8192
+MAX_MODEL_NAME_BYTES = 256
 
 logger = logging.getLogger("embedding-server")
 
@@ -60,6 +68,13 @@ _models: dict[str, object] = {}
 
 class _State:
     default_model: str = DEFAULT_MODEL
+    # Allowlist of HF model ids accepted on /embed. A compromised
+    # caller could otherwise post any arbitrary HF id and trick the
+    # embedder into downloading large or untrusted weights. The
+    # default is the single model the server was started with;
+    # extensible at startup via --allow-model or the
+    # EMBEDDING_ALLOWED_MODELS env var.
+    allowed_models: set[str] = set()
     ready: bool = False
 
 
@@ -111,9 +126,12 @@ app = FastAPI(
 )
 
 
+BoundedText = Annotated[str, StringConstraints(max_length=MAX_TEXT_BYTES)]
+
+
 class EmbedRequest(BaseModel):
-    model: Optional[str] = None
-    texts: list[str] = Field(default_factory=list)
+    model: Optional[str] = Field(default=None, max_length=MAX_MODEL_NAME_BYTES)
+    texts: list[BoundedText] = Field(default_factory=list, max_length=MAX_TEXTS_PER_REQUEST)
 
 
 class EmbedResponse(BaseModel):
@@ -125,15 +143,23 @@ class EmbedResponse(BaseModel):
 @app.post("/embed", response_model=EmbedResponse)
 async def embed(req: EmbedRequest) -> EmbedResponse:
     name = req.model or _State.default_model
+    if name not in _State.allowed_models:
+        logger.warning("rejected /embed for non-allowlisted model: %r", name)
+        raise HTTPException(status_code=400, detail=f"model {name!r} is not in the allowlist")
     if not req.texts:
         return EmbedResponse(model=name, dimensions=0, embeddings=[])
     try:
         dims, vectors = await asyncio.get_event_loop().run_in_executor(
             _inference_pool, _encode, name, list(req.texts)
         )
-    except Exception as exc:
+    except HTTPException:
+        raise
+    except Exception:
+        # Log the real exception server-side, but do not leak
+        # internals (file paths, library tracebacks, model state)
+        # back to the client.
         logger.exception("embedding failure for model=%s n=%d", name, len(req.texts))
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="internal server error")
     return EmbedResponse(model=name, dimensions=dims, embeddings=vectors)
 
 
@@ -159,12 +185,27 @@ def main() -> int:
         help="Hugging Face model id to preload at startup",
     )
     parser.add_argument(
+        "--allow-model",
+        action="append",
+        default=[],
+        metavar="HF_MODEL_ID",
+        help="Additional HF model id permitted on /embed (repeatable). "
+        "The --model is always in the allowlist.",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.environ.get("LOG_LEVEL", "info"),
         choices=["critical", "error", "warning", "info", "debug"],
     )
     args = parser.parse_args()
     _State.default_model = args.model
+    allowed = {args.model, *args.allow_model}
+    if env := os.environ.get("EMBEDDING_ALLOWED_MODELS"):
+        for m in env.split(","):
+            m = m.strip()
+            if m:
+                allowed.add(m)
+    _State.allowed_models = allowed
 
     logging.basicConfig(
         level=args.log_level.upper(),

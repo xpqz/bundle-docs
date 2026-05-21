@@ -413,7 +413,7 @@ Full build/runtime knobs (registry push, multi-arch, env vars, the
 embedder-scaling pattern when one isn't enough) are in
 [`deploy/README.md`](deploy/README.md).
 
-### Hardening state
+### Hardening state — `docsearch-web`
 
 Current security posture of `docsearch serve` as shipped in the
 `docsearch-web` image.
@@ -433,9 +433,35 @@ Current security posture of `docsearch serve` as shipped in the
 | Container user | Both `web` and `embedder` run as a non-root UID (`10001`). |
 | Container filesystem | No volumes mounted. DB, sqlite-vec extension, and model weights are baked into the image and read-only at runtime. |
 | Build context | `.dockerignore` excludes `.venv/`, `.git/`, `.claude/`, `.skis/`, and local `bin/` artifacts so secrets and large local state never enter the image build. |
-| Embedder request shape | Inputs to `/embed` are validated by Pydantic models; bad shapes return `422` with structured detail. |
 | TLS | Not configured. Caddy runs HTTP-only inside the stack. For public exposure, drop `auto_https off` from the `Caddyfile` and assign a hostname to enable Let's Encrypt. |
 | Authentication / authorization | None. The stack assumes a known trusted group of users. Front with `oauth2-proxy`, an SSO sidecar, or your existing reverse proxy for public access. |
+| Rate limiting | None. |
+
+### Hardening state — `docsearch-embedder`
+
+The embedder is exposed only via `expose: 8000` in `compose.yaml`,
+so it is reachable only from other containers on the docker network
+(typically just `web`). The list below describes its posture for
+in-network callers.
+
+| Concern | State |
+|---|---|
+| Network exposure | No host port mapping. Reachable from other containers on the docker network only. The default bind in the container is `0.0.0.0:8000`. |
+| Request shape | Pydantic v2 models on `/embed` reject malformed input with `422` and structured detail. |
+| Input caps | `texts` capped at 64 items per request; each text capped at 8192 characters; `model` name capped at 256 characters. Values configured in `scripts/embedding-server.py` as `MAX_TEXTS_PER_REQUEST`, `MAX_TEXT_BYTES`, `MAX_MODEL_NAME_BYTES`. |
+| Model allowlist | `/embed` rejects any model id not in the configured allowlist with `400`. Default allowlist is the single model the embedder was started with (`--model`); extend with `--allow-model` (repeatable) or the `EMBEDDING_ALLOWED_MODELS` env var (comma-separated). Prevents a compromised caller from coaxing the embedder into downloading arbitrary HF weights. |
+| Server error responses | `/embed` 500s return `{"detail":"internal server error"}`. The underlying exception is logged via `logger.exception` server-side; filesystem paths, library tracebacks, and model state are not echoed back. |
+| Inference concurrency | One worker thread per process. Concurrent requests queue at the executor rather than racing on the same PyTorch model. |
+| `/healthz` | Always `200 {"status":"ok"}`; no per-request work, safe for liveness probes. |
+| `/readyz` | `503` until the preloaded model is in memory, then `200 {"status":"ready","models":[...]}`. Exposes the *loaded* model ids, not the allowlist. |
+| Container user | Runs as a non-root UID (`10001`). |
+| Container filesystem | No volumes; model weights live in the image's `$HF_HOME` (`/opt/huggingface`), owned by the embedder user and read-only at runtime. |
+| SQL | None. |
+| Shell execution | None. |
+| Filesystem access from requests | None. The `model` field flows only into `SentenceTransformer(name)`, which is gated by the allowlist before any filesystem or network lookup. |
+| Cookies / sessions / CSRF | No cookies, no sessions, no state-changing endpoints. |
+| TLS | Not configured. Internal docker traffic only. |
+| Authentication / authorization | None. The trust boundary is the docker network. A compromised `web` container can reach `/embed`, but the allowlist + input caps bound the damage. |
 | Rate limiting | None. |
 
 ## Releases
