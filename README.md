@@ -378,6 +378,66 @@ A JSON array mapping APL symbols to documentation URL paths:
 - Git (for cloning the documentation repo)
 - CGO enabled (for sqlite3)
 
+## Docker compose deployment
+
+The [`deploy/`](deploy/) directory contains a docker compose stack
+for serving docsearch on a single host. Target scale is double-digit
+concurrent users; no Kubernetes.
+
+### Stack layout
+
+| Service | Image | Role |
+|---|---|---|
+| `proxy` | `caddy:2-alpine` | Round-robins to `web` replicas with `/api/health`-based active health checks. Exposes the stack on `HOST_PORT` (default `8080`). |
+| `web` | `docsearch-web` | Stateless `docsearch serve`. The compiled docsearch binary, the `sqlite-vec` extension, and the populated `dyalog-docs.db` are baked into the image. Scale with `--scale web=N`. |
+| `embedder` | `docsearch-embedder` | FastAPI/uvicorn process with `sentence-transformers` and the default `BAAI/bge-small-en-v1.5` model weights preloaded. Single instance serves all `web` replicas via the `embedder:8000` service name. |
+
+The database is read-only at runtime and is baked into the `web`
+image, so containers have no volumes and no shared state. Updating
+the docs is an image rebuild plus a redeploy.
+
+### Quick start
+
+```bash
+deploy/build-db.sh       # bundle-docs → embedder → semantic-index → deploy/dyalog-docs.db
+deploy/build-images.sh   # docker buildx → docsearch-web + docsearch-embedder (linux/arm64 default)
+cd deploy && docker compose up -d
+# browse http://localhost:8080
+```
+
+Scale: `docker compose up -d --scale web=5`.
+Docs refresh: rerun `build-db.sh` then `TAG=$(date +%F) build-images.sh` and
+`docker compose up -d --force-recreate`.
+
+Full build/runtime knobs (registry push, multi-arch, env vars, the
+embedder-scaling pattern when one isn't enough) are in
+[`deploy/README.md`](deploy/README.md).
+
+### Hardening state
+
+Current security posture of `docsearch serve` as shipped in the
+`docsearch-web` image.
+
+| Concern | State |
+|---|---|
+| SQL injection | All queries use bound parameters via `database/sql`. The one `fmt.Sprintf`-built SQL string (`VectorSchemaSQL`) interpolates a fixed integer dimension. |
+| Chunk-render XSS | Goldmark output is sanitized with [`bluemonday`](https://github.com/microcosm-cc/bluemonday)'s `UGCPolicy` plus explicit allow-listing of `class` attributes on heading/code/table elements. `<script>`, `<iframe>`, `<object>`, `<embed>`, all `on*` event handlers, `javascript:`/`vbscript:`/`data:` URLs (except `data:image/*` for `<img>`), and SVG-embedded scripts are stripped. |
+| Response headers | Every response carries `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`. CSP is `default-src 'none'` on `/api/*` and `default-src 'self'` (with `'unsafe-inline'` for the page's own inline `<style>` and `<script>` blocks) on `/`. |
+| Server error responses | 500s return a generic `{"error":"internal server error"}` body. The underlying error is logged server-side. SQL state, filesystem paths, and embedder URLs are not echoed back to clients. |
+| Path traversal | `/api/chunk/<id>` extracts the id via `strings.TrimPrefix` + `strconv.ParseInt`; non-numeric, negative, or slash-bearing input is rejected with 400. SQL `?` bind makes filesystem access from URL parameters impossible regardless. |
+| Query length | `q` on `/api/search` is capped at 256 characters. |
+| `/api/health` | Returns `{"status":"ok","vector_ready":<bool>}` only. Configuration (embedding URL, DB path) is not exposed. |
+| SSRF | The embedder URL is operator-configured via `-embedding-url` or `DOCSEARCH_EMBEDDING_URL`; it is never sourced from request data. |
+| CSRF | The API is read-only. No state-changing endpoints exist. |
+| Cookies / sessions | None used. |
+| Container user | Both `web` and `embedder` run as a non-root UID (`10001`). |
+| Container filesystem | No volumes mounted. DB, sqlite-vec extension, and model weights are baked into the image and read-only at runtime. |
+| Build context | `.dockerignore` excludes `.venv/`, `.git/`, `.claude/`, `.skis/`, and local `bin/` artifacts so secrets and large local state never enter the image build. |
+| Embedder request shape | Inputs to `/embed` are validated by Pydantic models; bad shapes return `422` with structured detail. |
+| TLS | Not configured. Caddy runs HTTP-only inside the stack. For public exposure, drop `auto_https off` from the `Caddyfile` and assign a hostname to enable Let's Encrypt. |
+| Authentication / authorization | None. The stack assumes a known trusted group of users. Front with `oauth2-proxy`, an SSO sidecar, or your existing reverse proxy for public access. |
+| Rate limiting | None. |
+
 ## Releases
 
 Pre-built databases are available on the [Releases page](https://github.com/xpqz/bundle-docs/releases).
