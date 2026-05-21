@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
@@ -28,6 +29,44 @@ import (
 	"github.com/xpqz/bundle-docs/internal/semanticsearch"
 	"github.com/xpqz/bundle-docs/internal/semanticstore"
 )
+
+// maxQueryLength caps the q parameter on /api/search. The search box
+// in the UI realistically generates queries well under 100 chars; a
+// 10 KB query would otherwise burn a full embedder round-trip on
+// every keystroke.
+const maxQueryLength = 256
+
+// chunkHTMLPolicy is the allowlist applied to rendered chunk HTML
+// before it is returned to the browser. Without this, goldmark's
+// html.WithUnsafe() option lets any raw HTML in the upstream
+// markdown pass straight through; the corpus already contains a few
+// <script> tags in prose (chunk #1883 has them documented as text,
+// not in a code fence) and is sourced from a third-party repo, so
+// a single bad PR upstream would otherwise be enough to land XSS in
+// every replica's chunk panel.
+//
+// Built on bluemonday.UGCPolicy which already permits paragraphs,
+// lists, code, pre, blockquotes, headings, and tables; strips
+// <script>, <iframe>, <object>, <embed>, all on* event handlers,
+// and javascript:/vbscript: URLs. We add the few extras the
+// chunker actually emits: class attributes on heading/code/table
+// elements (mkdocs uses them for styling), target+rel on anchors
+// (so the rewritten dyalog.github.io links can keep target=_blank).
+var chunkHTMLPolicy = func() *bluemonday.Policy {
+	p := bluemonday.UGCPolicy()
+	p.AllowAttrs("class").OnElements(
+		"code", "pre", "span", "div",
+		"table", "thead", "tbody", "tr", "td", "th",
+		"h1", "h2", "h3", "h4", "h5", "h6",
+		"blockquote", "ul", "ol", "li", "p",
+	)
+	p.AllowAttrs("colspan", "rowspan").OnElements("td", "th")
+	p.AllowAttrs("target", "rel").OnElements("a")
+	// Our rewriteRelativeLinks already sets rel="noopener"; don't
+	// let bluemonday clobber it with its own value.
+	p.RequireNoFollowOnLinks(false)
+	return p
+}()
 
 // dyalogDocsBase is the public host where the Dyalog mkdocs site is
 // published. A chunk's source URL is formed by stripping the leading
@@ -78,11 +117,10 @@ func runServe(args []string) {
 	}
 
 	srv := &server{
-		db:           db,
-		vectorDims:   *vectorDims,
-		vectorReady:  vectorReady,
-		embedder:     semanticindex.HTTPEmbeddingClient{URL: *embeddingURL, Model: *embeddingModel},
-		embeddingURL: *embeddingURL,
+		db:          db,
+		vectorDims:  *vectorDims,
+		vectorReady: vectorReady,
+		embedder:    semanticindex.HTTPEmbeddingClient{URL: *embeddingURL, Model: *embeddingModel},
 		md: goldmark.New(
 			goldmark.WithExtensions(extension.GFM),
 			goldmark.WithParserOptions(parser.WithAutoHeadingID()),
@@ -98,8 +136,9 @@ func runServe(args []string) {
 
 	httpServer := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB; Go default, made explicit.
 	}
 
 	log.Printf("docsearch serve listening on http://%s (db=%s, vector_ready=%v)", *addr, *dbPath, vectorReady)
@@ -109,12 +148,11 @@ func runServe(args []string) {
 }
 
 type server struct {
-	db           *sql.DB
-	vectorDims   int
-	vectorReady  bool
-	embedder     semanticindex.Embedder
-	embeddingURL string
-	md           goldmark.Markdown
+	db          *sql.DB
+	vectorDims  int
+	vectorReady bool
+	embedder    semanticindex.Embedder
+	md          goldmark.Markdown
 }
 
 // sourceURL builds the canonical help.dyalog page URL for a chunk.
@@ -148,7 +186,10 @@ func sourceURL(file, anchor string) string {
 // renderMarkdown converts the chunk text to HTML. mkdocs admonitions
 // are converted to blockquotes so they survive a plain CommonMark
 // renderer, and relative `.md` cross-reference links are rewritten to
-// absolute help.dyalog.com URLs. On failure we fall back to a
+// absolute help.dyalog.com URLs. The result is then passed through
+// bluemonday so any raw HTML in upstream markdown that goldmark
+// would otherwise let through (under html.WithUnsafe) is sanitized
+// before reaching the client. On failure we fall back to a
 // pre-formatted block of the raw text so the UI still shows something
 // usable. sourceFile is the chunk's docs.file (may be empty for
 // databases without the docs table); when empty, cross-ref rewriting
@@ -161,7 +202,8 @@ func (s *server) renderMarkdown(text, sourceFile string) string {
 	if err := s.md.Convert([]byte(preprocessAdmonitions(text)), &buf); err != nil {
 		return "<pre>" + htmlEscape(text) + "</pre>"
 	}
-	return rewriteRelativeLinks(buf.String(), sourceFile)
+	rendered := rewriteRelativeLinks(buf.String(), sourceFile)
+	return chunkHTMLPolicy.Sanitize(rendered)
 }
 
 // mdLinkRE finds href="<path>.md" and href="<path>.md#anchor".
@@ -281,6 +323,47 @@ func htmlEscape(s string) string {
 	return r.Replace(s)
 }
 
+// securityHeaders wraps the mux to add a baseline set of response
+// headers. The CSP is strict for JSON APIs (default-src 'none', the
+// browser shouldn't render these as documents anyway) and looser for
+// the HTML page so its inline <style> and <script> blocks still run.
+// 'unsafe-inline' on script-src is the cost of keeping the page a
+// single embedded file; the chunk-render XSS surface is already
+// covered upstream by bluemonday so the CSP here is defense in depth.
+func securityHeaders(next http.Handler) http.Handler {
+	const apiCSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+	const htmlCSP = "default-src 'self'; " +
+		"script-src 'self' 'unsafe-inline'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; " +
+		"connect-src 'self'; " +
+		"frame-ancestors 'none'; " +
+		"base-uri 'none'; " +
+		"form-action 'self'"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			h.Set("Content-Security-Policy", apiCSP)
+		} else {
+			h.Set("Content-Security-Policy", htmlCSP)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// writeServerError logs the real error server-side and returns a
+// generic message to the client. Lets us tell the difference between
+// "we want to surface this validation failure to the user"
+// (writeJSONError) and "something went wrong internally that the
+// user can't act on and we shouldn't disclose".
+func writeServerError(w http.ResponseWriter, op string, err error) {
+	log.Printf("docsearch serve: %s: %v", op, err)
+	writeJSONError(w, http.StatusInternalServerError, "internal server error")
+}
+
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -290,11 +373,12 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(indexHTML)
 }
 
-func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	// vector_ready is enough for the UI; embedding_url is operator
+	// configuration and gratuitous to leak.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":        "ok",
-		"vector_ready":  s.vectorReady,
-		"embedding_url": s.embeddingURL,
+		"status":       "ok",
+		"vector_ready": s.vectorReady,
 	})
 }
 
@@ -302,6 +386,10 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing q parameter")
+		return
+	}
+	if len(q) > maxQueryLength {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("q must be %d characters or fewer", maxQueryLength))
 		return
 	}
 	mode := r.URL.Query().Get("mode")
@@ -334,7 +422,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		DedupeByDocument: true,
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeServerError(w, "search", err)
 		return
 	}
 
@@ -391,8 +479,16 @@ func (s *server) lookupChunkLocation(ctx context.Context, chunkID int64) (file, 
 }
 
 func (s *server) handleChunk(w http.ResponseWriter, r *http.Request) {
-	idStr := path.Base(r.URL.Path)
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	rest := strings.TrimPrefix(r.URL.Path, "/api/chunk/")
+	if rest == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing chunk id")
+		return
+	}
+	if strings.ContainsRune(rest, '/') {
+		writeJSONError(w, http.StatusBadRequest, "invalid chunk id")
+		return
+	}
+	id, err := strconv.ParseInt(rest, 10, 64)
 	if err != nil || id <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "invalid chunk id")
 		return
@@ -418,7 +514,7 @@ func (s *server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		writeServerError(w, "lookup chunk", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
