@@ -1,0 +1,30 @@
+# Front door for the docsearch stack. Caddy resolves the `web`
+# service name to the IPs of all replicas via Docker's embedded DNS
+# and round-robins between them. Health-checks let Caddy drop a
+# replica that fails /api/health so a restarting container doesn't
+# black-hole user requests.
+
+{
+    # Container-local proxy; no public TLS needed.
+    auto_https off
+    admin off
+}
+
+:80 {
+    encode zstd gzip
+
+    reverse_proxy web:8080 {
+        lb_policy round_robin
+        lb_try_duration 5s
+        lb_try_interval 250ms
+
+        health_uri /api/health
+        health_interval 10s
+        health_timeout 2s
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}

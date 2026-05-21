@@ -1,0 +1,77 @@
+# docsearch stack. Three services:
+#
+#   embedder  one FastAPI/uvicorn process with sentence-transformers
+#             loaded. Single replica is enough for ~100 users with
+#             debounced typing; bump deploy.replicas if /embed
+#             latency starts to back up.
+#   web       stateless docsearch serve container. The DB and the
+#             sqlite-vec extension are baked into the image at
+#             build time. Scale freely with
+#                 docker compose up -d --scale web=N
+#   proxy     Caddy in front. Round-robins across web replicas and
+#             health-checks /api/health so a restarting web does
+#             not absorb requests.
+#
+# Update flow when the upstream docs change (a few times a year):
+#   ./build-db.sh           # produce deploy/dyalog-docs.db
+#   ./build-images.sh       # rebuild web + embedder images
+#   docker compose up -d --force-recreate
+
+name: docsearch
+
+services:
+  embedder:
+    image: ${REGISTRY:-localhost}/docsearch-embedder:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.embedder
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=2).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # The model + torch sit around 1 GB resident on arm64.
+          # Bump if you swap in a larger model.
+          memory: 2g
+
+  web:
+    image: ${REGISTRY:-localhost}/docsearch-web:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    expose:
+      - "8080"
+    environment:
+      DOCSEARCH_EMBEDDING_URL: http://embedder:8000/embed
+    depends_on:
+      embedder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/api/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      replicas: ${WEB_REPLICAS:-2}
+      resources:
+        limits:
+          memory: 256m
+
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - "${HOST_PORT:-8080}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+    restart: unless-stopped
