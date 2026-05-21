@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"gopkg.in/yaml.v3"
@@ -48,6 +49,7 @@ func main() {
 
 	output := flag.String("o", defaultDBPath(), "output database path")
 	repo := flag.String("repo", "https://github.com/Dyalog/documentation.git", "documentation repo URL")
+	ref := flag.String("ref", "", "git ref (commit SHA, tag, or branch) to check out; empty = tip of main")
 	helpURLs := flag.String("help-urls", "", "path to symbol-urls.json (uses embedded data if empty)")
 	keep := flag.Bool("keep", false, "keep cloned repo (print path)")
 	flag.Parse()
@@ -69,11 +71,33 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Cloning %s...\n", *repo)
-	cmd := exec.Command("git", "clone", "--depth=1", "--branch=main", "--single-branch", *repo, tmpDir)
+	cloneArgs := []string{"clone", "--branch=main", "--single-branch"}
+	if *ref == "" {
+		// Shallow clone is enough when we just want the tip of main.
+		cloneArgs = append(cloneArgs, "--depth=1")
+	}
+	cloneArgs = append(cloneArgs, *repo, tmpDir)
+	cmd := exec.Command("git", cloneArgs...)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		log.Fatalf("git clone failed: %v", err)
 	}
+	if *ref != "" {
+		fmt.Fprintf(os.Stderr, "Checking out %s...\n", *ref)
+		checkout := exec.Command("git", "-C", tmpDir, "checkout", "--quiet", *ref)
+		checkout.Stderr = os.Stderr
+		if err := checkout.Run(); err != nil {
+			log.Fatalf("git checkout %q failed: %v", *ref, err)
+		}
+	}
+	// Resolve the actual SHA we're building from so the docs version
+	// gets recorded into the database meta table below.
+	headOut, err := exec.Command("git", "-C", tmpDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		log.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	docsSHA := strings.TrimSpace(string(headOut))
+	fmt.Fprintf(os.Stderr, "Docs ref: %s\n", docsSHA)
 	if *keep {
 		fmt.Fprintf(os.Stderr, "Repo cloned to: %s\n", tmpDir)
 	}
@@ -126,6 +150,10 @@ func main() {
 		CREATE TABLE help_urls (
 			symbol TEXT PRIMARY KEY,
 			path TEXT NOT NULL
+		);
+		CREATE TABLE meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
 		);
 	`); err != nil {
 		log.Fatal(err)
@@ -226,6 +254,19 @@ func main() {
 				log.Fatal(err)
 			}
 			fmt.Fprintf(os.Stderr, "Help URLs: %d parsed, %d matched to docs\n", len(entries), matched)
+		}
+	}
+
+	// Record where this DB came from so `docsearch version` and the
+	// web UI can surface "what's actually deployed".
+	metaRows := [][2]string{
+		{"docs_ref", docsSHA},
+		{"docs_repo", *repo},
+		{"built_at", time.Now().UTC().Format(time.RFC3339)},
+	}
+	for _, kv := range metaRows {
+		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)`, kv[0], kv[1]); err != nil {
+			log.Fatalf("write meta %s: %v", kv[0], err)
 		}
 	}
 

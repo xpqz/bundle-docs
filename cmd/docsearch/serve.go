@@ -132,6 +132,7 @@ func runServe(args []string) {
 	mux.HandleFunc("/api/search", srv.handleSearch)
 	mux.HandleFunc("/api/chunk/", srv.handleChunk)
 	mux.HandleFunc("/api/health", srv.handleHealth)
+	mux.HandleFunc("/api/version", srv.handleVersion)
 	mux.HandleFunc("/", srv.handleIndex)
 
 	httpServer := &http.Server{
@@ -380,6 +381,10 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"status":       "ok",
 		"vector_ready": s.vectorReady,
 	})
+}
+
+func (s *server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, collectVersionInfo(s.db))
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {

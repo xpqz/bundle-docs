@@ -63,6 +63,9 @@ func defaultVectorExtension() string {
 }
 
 func main() {
+	if maybeRunVersion(os.Args) {
+		return
+	}
 	if maybeRunSemanticIndex(os.Args) {
 		return
 	}
@@ -93,6 +96,8 @@ USAGE
   docsearch -s <query>          Search for documents matching <query>
   docsearch -r <rowid>          Fetch the full content of a document by its rowid
   docsearch semantic-index      Build or refresh the semantic chunk/vector index
+  docsearch serve               HTTP API + web UI (requires fts5+semantic build)
+  docsearch version             Print binary build + indexed-docs version info
 
 WORKFLOW
   Searching is a two-step process:

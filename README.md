@@ -23,7 +23,17 @@ mkdocs site into a single SQLite database and ships two front-ends:
 go install github.com/xpqz/bundle-docs@latest
 ```
 
-Or build from source. The project has two independent build tags:
+Or build from source via the [`Makefile`](Makefile) (recommended — it
+wraps every common workflow):
+
+```bash
+make build         # ./bin/bundle-docs + ./bin/docsearch (fts5+semantic)
+make test          # go tests across all 3 tag combos + python tests
+make refresh       # rebuild DB + images + redeploy compose stack
+make help          # full list
+```
+
+The project has two independent Go build tags:
 
 | Build command | What you get | Binary size (docsearch) |
 |---|---|---|
@@ -399,19 +409,42 @@ the docs is an image rebuild plus a redeploy.
 ### Quick start
 
 ```bash
-deploy/build-db.sh       # bundle-docs → embedder → semantic-index → deploy/dyalog-docs.db
-deploy/build-images.sh   # docker buildx → docsearch-web + docsearch-embedder (linux/arm64 default)
-cd deploy && docker compose up -d
+make refresh
+# or equivalently:
+#   make db        # deploy/dyalog-docs.db, built inside Docker (no host Go/Python needed)
+#   make images    # docsearch-web + docsearch-embedder OCI images
+#   make up        # docker compose up -d
 # browse http://localhost:8080
 ```
 
 Scale: `docker compose up -d --scale web=5`.
-Docs refresh: rerun `build-db.sh` then `TAG=$(date +%F) build-images.sh` and
-`docker compose up -d --force-recreate`.
+
+Pin the upstream docs revision: `make db DOCS_REF=<sha>`. The
+resolved SHA is written into the DB's `meta` table and surfaced by
+`docsearch version` (and `GET /api/version`).
 
 Full build/runtime knobs (registry push, multi-arch, env vars, the
 embedder-scaling pattern when one isn't enough) are in
 [`deploy/README.md`](deploy/README.md).
+
+### Versioning
+
+Every binary built via the Makefile is stamped with the git SHA and
+build timestamp:
+
+```sh
+$ docsearch version
+docsearch  4a1f2c8
+built      2026-05-21T11:00:00Z
+go         go1.24.0
+docs ref   4696183d2f8a9b1c3e7f
+docs repo  https://github.com/Dyalog/documentation.git
+docs built 2026-05-21T10:30:00Z
+```
+
+The same info is available as JSON on `GET /api/version`, which is
+useful for the proxy or an external monitor to confirm what's
+actually deployed in each `web` replica.
 
 ### Hardening state — `docsearch-web`
 

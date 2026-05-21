@@ -25,28 +25,53 @@ rebuild + redeploy.
 | `Dockerfile.embedder` | Python image with sentence-transformers + the FastAPI server. Model weights downloaded at build time |
 | `compose.yaml` | Three-service stack with healthchecks, replica counts, and resource limits |
 | `Caddyfile` | Round-robin reverse proxy with `/api/health`-based active health checks |
-| `build-db.sh` | Run on the host: produces `dyalog-docs.db` via `bundle-docs` + `semantic-index` |
-| `build-images.sh` | Build both images with buildx (defaults to `linux/arm64`) |
+| `Dockerfile.dbbuilder` | Multi-stage build that runs the entire `bundle-docs` -> embedder -> `semantic-index` pipeline inside containers. No host toolchain required |
+| `build-db-docker.sh` | Wrapper around `docker buildx build` that drops the resulting `dyalog-docs.db` into `deploy/` via buildx local output |
+| `build-db.sh` | Host-toolchain DB build (faster iteration cycle for developers with Go + Python + sqlite-vec already installed) |
+| `build-db-in-docker.sh` | Pipeline script invoked inside `Dockerfile.dbbuilder` |
+| `build-images.sh` | Build both runtime images with buildx (defaults to `linux/arm64`) |
 
 ## First-time setup
 
+The recommended path is the project-root `Makefile`, which wraps
+every step:
+
 ```bash
-# 1. Local toolchain — only needed for the DB build.
-python -m venv .venv
-.venv/bin/pip install -r scripts/requirements-embedding-server.txt
+make refresh        # build DB (in Docker), build images, docker compose up -d
+```
 
-# 2. Build the DB (clones the docs repo, runs the embedder, indexes).
-#    Output: deploy/dyalog-docs.db
-./deploy/build-db.sh
+Or run the individual steps:
 
-# 3. Build the images.
-./deploy/build-images.sh
-
-# 4. Start the stack.
-cd deploy && docker compose up -d
+```bash
+make db             # deploy/dyalog-docs.db via Docker (no host Go/Python needed)
+make images        # docsearch-web + docsearch-embedder
+make up            # docker compose up -d
 ```
 
 Browse <http://localhost:8080>.
+
+### Docker-only DB build
+
+`make db` (or `./deploy/build-db-docker.sh`) builds `dyalog-docs.db`
+entirely inside containers via `Dockerfile.dbbuilder`. The only host
+requirement is Docker with buildx; no Go, Python, or sqlite-vec
+needed locally.
+
+To pin the upstream Dyalog docs revision:
+
+```bash
+make db DOCS_REF=abcdef1234567890
+```
+
+The resolved SHA, repo URL, and build timestamp are recorded in the
+`meta` table inside the DB and surfaced by `docsearch version` and
+`GET /api/version`.
+
+### Host-toolchain build (developers only)
+
+If you already have Go, Python, and sqlite-vec installed and want a
+faster iteration loop, `make db-host` runs the same pipeline using
+local binaries instead of Docker. The resulting DB is byte-identical.
 
 ## Scaling
 
