@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -338,4 +340,99 @@ func execSQL(t *testing.T, db *sql.DB, query string, args ...any) {
 
 func quoteFTS(q string) string {
 	return `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
+}
+
+// TestOpenWithVectorAllowsConcurrentReaders confirms the
+// ConnectHook-backed driver lets multiple goroutines hold their
+// own connections at the same time, which is what
+// docsearch serve needs under live-search load.
+func TestOpenWithVectorAllowsConcurrentReaders(t *testing.T) {
+	extensionPath := os.Getenv("SQLITE_VEC_PATH")
+	if extensionPath == "" {
+		t.Skip("SQLITE_VEC_PATH not set; skipping concurrent reader test")
+	}
+	dbPath := filepath.Join(t.TempDir(), "concurrent.db")
+
+	db, err := OpenWithVector(dbPath, extensionPath)
+	if err != nil {
+		t.Fatalf("OpenWithVector: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+
+	if err := EnsureCoreSchema(db); err != nil {
+		t.Fatalf("core schema: %v", err)
+	}
+	if err := EnsureVectorSchema(db, VectorConfig{Dimensions: DefaultEmbeddingDimensions}); err != nil {
+		t.Fatalf("vec schema: %v", err)
+	}
+
+	// Hold a connection open in one goroutine, run another query
+	// on a second goroutine. With MaxOpenConns(1) the second would
+	// block until the first releases; with ConnectHook + 4-pool
+	// both proceed concurrently.
+	holdReady := make(chan struct{})
+	holdRelease := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		conn, err := db.Conn(t.Context())
+		if err != nil {
+			t.Errorf("acquire conn 1: %v", err)
+			close(holdReady)
+			return
+		}
+		defer conn.Close()
+		var n int
+		if err := conn.QueryRowContext(t.Context(), "SELECT 1").Scan(&n); err != nil {
+			t.Errorf("conn1 query: %v", err)
+		}
+		close(holdReady)
+		<-holdRelease
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-holdReady
+		var version string
+		if err := db.QueryRow("SELECT vec_version()").Scan(&version); err != nil {
+			t.Errorf("vec_version while conn1 holds: %v", err)
+		}
+		if version == "" {
+			t.Errorf("expected non-empty vec_version, got empty")
+		}
+		close(holdRelease)
+	}()
+
+	wg.Wait()
+}
+
+// TestRegisterVectorDriverRejectsConflictingPath protects callers
+// from accidentally re-registering the global driver name with a
+// different extension path.
+func TestRegisterVectorDriverRejectsConflictingPath(t *testing.T) {
+	extensionPath := os.Getenv("SQLITE_VEC_PATH")
+	if extensionPath == "" {
+		t.Skip("SQLITE_VEC_PATH not set; skipping driver re-registration test")
+	}
+	if err := RegisterVectorDriver(extensionPath); err != nil {
+		t.Fatalf("first registration: %v", err)
+	}
+	// Re-registering with the same path is fine (no-op).
+	if err := RegisterVectorDriver(extensionPath); err != nil {
+		t.Fatalf("second registration with same path: %v", err)
+	}
+	// Different path should error.
+	other := filepath.Join(t.TempDir(), "bogus-vec.dylib")
+	if err := os.WriteFile(other, []byte{0}, 0o644); err != nil {
+		t.Fatalf("write fake ext: %v", err)
+	}
+	err := RegisterVectorDriver(other)
+	if err == nil || !strings.Contains(err.Error(), "already registered") {
+		t.Fatalf("expected conflict error, got %v", err)
+	}
 }

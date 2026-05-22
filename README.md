@@ -455,6 +455,7 @@ Current security posture of `docsearch serve` as shipped in the
 |---|---|
 | SQL injection | All queries use bound parameters via `database/sql`. The one `fmt.Sprintf`-built SQL string (`VectorSchemaSQL`) interpolates a fixed integer dimension. |
 | Chunk-render XSS | Goldmark output is sanitized with [`bluemonday`](https://github.com/microcosm-cc/bluemonday)'s `UGCPolicy` plus explicit allow-listing of `class` attributes on heading/code/table elements. `<script>`, `<iframe>`, `<object>`, `<embed>`, all `on*` event handlers, `javascript:`/`vbscript:`/`data:` URLs (except `data:image/*` for `<img>`), and SVG-embedded scripts are stripped. |
+| Panic isolation | `recoverPanics` middleware catches handler panics, returns a clean `{"error":"internal server error"}`, and logs a structured ERROR record with the panic value and stack trace. The original error never reaches the wire. |
 | Response headers | Every response carries `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`. CSP is `default-src 'none'` on `/api/*` and `default-src 'self'` (with `'unsafe-inline'` for the page's own inline `<style>` and `<script>` blocks) on `/`. |
 | Server error responses | 500s return a generic `{"error":"internal server error"}` body. The underlying error is logged server-side. SQL state, filesystem paths, and embedder URLs are not echoed back to clients. |
 | Path traversal | `/api/chunk/<id>` extracts the id via `strings.TrimPrefix` + `strconv.ParseInt`; non-numeric, negative, or slash-bearing input is rejected with 400. SQL `?` bind makes filesystem access from URL parameters impossible regardless. |
@@ -469,6 +470,19 @@ Current security posture of `docsearch serve` as shipped in the
 | TLS | Not configured. Caddy runs HTTP-only inside the stack. For public exposure, drop `auto_https off` from the `Caddyfile` and assign a hostname to enable Let's Encrypt. |
 | Authentication / authorization | None. The stack assumes a known trusted group of users. Front with `oauth2-proxy`, an SSO sidecar, or your existing reverse proxy for public access. |
 | Rate limiting | None. |
+
+### Operational behaviour — `docsearch-web`
+
+| Concern | State |
+|---|---|
+| Startup sanity | At boot, `SELECT count(*) FROM docs` and `SELECT count(*) FROM chunks` run with a 3 s timeout. Process refuses to start if `docs` is empty (almost always indicates a wrong `-d` path) and logs the counts otherwise. |
+| Liveness probe | `GET /api/health` actually queries the database (`SELECT count(*) FROM docs` with a 2 s timeout). Returns `503 status=down` if the DB is unreachable; `200 status=ok` if everything works; `200 status=degraded` when the DB is fine but `vector_ready=false` so the proxy keeps the replica in rotation for FTS-only traffic. |
+| Per-request timeouts | `/api/search` runs with a 30 s context deadline; `/api/chunk/<id>` with 5 s; `/api/health` with 2 s. Client `AbortController` disconnects also propagate via `r.Context()` cancellation. |
+| Concurrent reads | SQLite connection pool capped at 8 open connections. `sqlite-vec` is loaded automatically on every new connection through a `ConnectHook`-backed driver, so multiple search requests don't serialise on a single pinned connection. |
+| Access log | One structured JSON line per request via `log/slog` (method, path, status, duration, bytes, `req_id`, remote). `/api/health` and `/api/version` are sampled out to keep monitoring noise down. |
+| Request correlation | Every response carries an `X-Request-ID` header matching the `req_id` field in the access log, so user-reported issues can be traced to specific log lines. |
+| Graceful shutdown | `SIGINT` / `SIGTERM` triggers `http.Server.Shutdown` with a 5 s drain window. Logs `received shutdown signal, draining in-flight requests` then exits cleanly. Pairs with `docker compose down`'s 10 s grace period so in-flight requests get a chance to finish. |
+| Embedder retries | `HTTPEmbeddingClient` retries up to 3 times with exponential backoff (200 ms → 600 ms → 1.8 s) on transient errors: connection refused/reset, DNS hiccups, 5xx responses, EOF mid-decode. Does *not* retry 4xx, context cancellation, or response-shape errors. |
 
 ### Hardening state — `docsearch-embedder`
 

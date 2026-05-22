@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/mattn/go-sqlite3"
 )
@@ -106,6 +107,68 @@ func UpsertChunkVector(db *sql.DB, chunkID int64, embedding string) error {
 		return fmt.Errorf("insert vector for chunk %d: %w", chunkID, err)
 	}
 	return nil
+}
+
+// VectorDriverName is the registered name for a sqlite3 driver
+// variant that auto-loads sqlite-vec on every new connection.
+// Pass this to sql.Open() so the resulting *sql.DB can serve
+// multiple concurrent vector queries without serializing on a
+// single connection.
+const VectorDriverName = "sqlite3_vec"
+
+var (
+	vecDriverMu   sync.Mutex
+	vecDriverPath string
+)
+
+// RegisterVectorDriver registers (once per process) a sqlite3
+// driver variant whose ConnectHook loads sqlite-vec on every new
+// connection. Subsequent calls are no-ops as long as the same
+// extension path is requested; calling with a different path
+// returns an error because Go's sql package keeps registered
+// drivers in a global map and re-registration panics.
+//
+// Use this in preference to LoadVectorExtension for long-running
+// servers that need concurrent readers. LoadVectorExtension is
+// kept for one-shot CLI usage where a pinned single connection is
+// fine.
+func RegisterVectorDriver(extPath string) error {
+	if extPath == "" {
+		return fmt.Errorf("%w: sqlite-vec extension path is empty", ErrVectorExtensionUnavailable)
+	}
+	if _, err := os.Stat(extPath); err != nil {
+		return fmt.Errorf("%w: sqlite-vec extension %q is not available: %v", ErrVectorExtensionUnavailable, extPath, err)
+	}
+
+	vecDriverMu.Lock()
+	defer vecDriverMu.Unlock()
+
+	if vecDriverPath == "" {
+		sql.Register(VectorDriverName, &sqlite3.SQLiteDriver{
+			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				// sqlite-vec exports sqlite3_vec_init; mattn's
+				// driver would otherwise derive sqlite3_vec0_init
+				// from the file name and fail dlsym.
+				return conn.LoadExtension(extPath, "sqlite3_vec_init")
+			},
+		})
+		vecDriverPath = extPath
+		return nil
+	}
+	if vecDriverPath != extPath {
+		return fmt.Errorf("sqlite-vec driver already registered with path %q; cannot re-register with %q", vecDriverPath, extPath)
+	}
+	return nil
+}
+
+// OpenWithVector opens dbPath through the ConnectHook-backed driver.
+// The returned *sql.DB will load sqlite-vec on each new connection,
+// so SetMaxOpenConns can be tuned freely.
+func OpenWithVector(dbPath, extPath string) (*sql.DB, error) {
+	if err := RegisterVectorDriver(extPath); err != nil {
+		return nil, err
+	}
+	return sql.Open(VectorDriverName, dbPath)
 }
 
 func LoadVectorExtension(db *sql.DB, path string) error {

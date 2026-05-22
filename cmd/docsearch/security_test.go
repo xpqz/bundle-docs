@@ -229,7 +229,9 @@ type leakyError struct{ msg string }
 func (e *leakyError) Error() string { return e.msg }
 
 // newTestServer wires up just enough of the server struct for unit
-// tests that don't need a populated DB.
+// tests that don't need a populated DB. The minimal docs/meta tables
+// are created and seeded with one row so the smart healthcheck
+// doesn't 503 in tests that don't care about it.
 func newTestServer(t *testing.T) *server {
 	t.Helper()
 	db, err := sql.Open("sqlite3", ":memory:")
@@ -240,9 +242,17 @@ func newTestServer(t *testing.T) *server {
 	if err := semanticstore.EnsureCoreSchema(db); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS docs(path TEXT, file TEXT, title TEXT, keywords TEXT, content TEXT, exclude INTEGER);
+		INSERT INTO docs(path, file, title, keywords, content, exclude)
+		VALUES ('test/path', 'test.md', 'Test', '', 'body', 0);
+	`); err != nil {
+		t.Fatalf("seed docs: %v", err)
+	}
 	return &server{
-		db:         db,
-		vectorDims: 384,
+		db:          db,
+		vectorDims:  384,
+		vectorReady: true,
 		md: goldmark.New(
 			goldmark.WithExtensions(extension.GFM),
 			goldmark.WithParserOptions(parser.WithAutoHeadingID()),

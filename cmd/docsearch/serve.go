@@ -5,18 +5,26 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	_ "embed"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
 	"path"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/microcosm-cc/bluemonday"
@@ -99,21 +107,48 @@ func runServe(args []string) {
 		log.Fatal(err)
 	}
 
-	db, err := sql.Open("sqlite3", *dbPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	vectorReady := false
+	// Open the DB via the ConnectHook-backed driver when sqlite-vec
+	// is available, so concurrent searches do not serialize on one
+	// connection. If the extension is missing we fall back to the
+	// plain driver - vector/hybrid will fail at query time but FTS
+	// keeps working.
+	var (
+		db          *sql.DB
+		err         error
+		vectorReady bool
+	)
 	if *vectorExtension != "" {
-		if err := semanticstore.LoadVectorExtension(db, *vectorExtension); err != nil {
-			log.Printf("WARN: sqlite-vec not loaded (%v); vector/hybrid modes will fail until the extension is available", err)
+		db, err = semanticstore.OpenWithVector(*dbPath, *vectorExtension)
+		if err != nil {
+			log.Printf("WARN: sqlite-vec not loaded (%v); falling back to fts-only mode", err)
+			db, err = sql.Open("sqlite3", *dbPath)
+			if err != nil {
+				log.Fatal(err)
+			}
 		} else {
 			vectorReady = true
 		}
 	} else {
 		log.Printf("WARN: no -vector-extension or %s; only -semantic-mode fts will work", envVectorExtension)
+		db, err = sql.Open("sqlite3", *dbPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	defer db.Close()
+
+	// Bound the connection pool. Read-only workload, so multiple
+	// readers are fine; sqlite-vec is loaded per connection via the
+	// ConnectHook.
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
+	db.SetConnMaxLifetime(0)
+
+	// Startup sanity: do not silently come up against an empty or
+	// missing DB. A zero-doc table almost certainly means somebody
+	// pointed -d at the wrong file or forgot to run bundle-docs.
+	if err := sanityCheckDB(db); err != nil {
+		log.Fatalf("docsearch serve: database sanity check failed: %v", err)
 	}
 
 	srv := &server{
@@ -135,16 +170,54 @@ func runServe(args []string) {
 	mux.HandleFunc("/api/version", srv.handleVersion)
 	mux.HandleFunc("/", srv.handleIndex)
 
+	// Middleware order (outer to inner):
+	//   accessLog      - emits one JSON line per request with method,
+	//                    path, status, duration, request id. Has to
+	//                    be outermost so the wrapped ResponseWriter
+	//                    is what every inner layer sees, including
+	//                    recoverPanics when it writes its 500.
+	//   recoverPanics  - catches handler panics, returns a clean
+	//                    500, logs structured detail.
+	//   securityHeaders- CSP / nosniff / X-Frame / Referrer-Policy.
+	handler := accessLog(recoverPanics(securityHeaders(mux)))
+
 	httpServer := &http.Server{
 		Addr:              *addr,
-		Handler:           securityHeaders(mux),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MiB; Go default, made explicit.
 	}
 
+	// Graceful shutdown on SIGINT/SIGTERM. docker compose down sends
+	// SIGTERM with a 10s grace period; we use 5s for our own
+	// Shutdown so any final response can flush before the runtime
+	// SIGKILLs us. Read-only API so there is no committed work at
+	// risk, but in-flight long embed calls deserve a clean exit.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+		close(serverErr)
+	}()
+
 	log.Printf("docsearch serve listening on http://%s (db=%s, vector_ready=%v)", *addr, *dbPath, vectorReady)
-	if err := httpServer.ListenAndServe(); err != nil {
-		log.Fatal(err)
+
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			log.Fatalf("docsearch serve: listen: %v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("docsearch serve: received shutdown signal, draining in-flight requests")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("docsearch serve: shutdown: %v", err)
+		}
 	}
 }
 
@@ -365,6 +438,162 @@ func writeServerError(w http.ResponseWriter, op string, err error) {
 	writeJSONError(w, http.StatusInternalServerError, "internal server error")
 }
 
+// accessLogger emits one structured (JSON) line per request. We use
+// slog rather than log.Printf so the result is machine-parseable
+// out of the box - useful when grepping across multiple replicas.
+var accessLogger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+// requestIDHeader is the header name we set on every response. Lets
+// users / Caddy correlate a flaky request with a server-side log
+// line.
+const requestIDHeader = "X-Request-ID"
+
+// loggingResponseWriter shadows the real ResponseWriter so we can
+// record the status code and bytes written for the access log.
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (l *loggingResponseWriter) WriteHeader(code int) {
+	l.status = code
+	l.ResponseWriter.WriteHeader(code)
+}
+
+func (l *loggingResponseWriter) Write(b []byte) (int, error) {
+	if l.status == 0 {
+		l.status = http.StatusOK
+	}
+	n, err := l.ResponseWriter.Write(b)
+	atomic.AddInt64(&l.bytes, int64(n))
+	return n, err
+}
+
+// genRequestID returns a short, URL-safe random token. Crypto-rand
+// based but truncated to 8 bytes (40 bits) - plenty for correlating
+// log lines, not meant for security.
+func genRequestID() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Extremely unlikely; fall back to a time-based id so we
+		// never silently log "".
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf[:]))
+}
+
+// accessLog logs one structured line per request after the handler
+// returns. /api/health and /api/version are sampled out to avoid
+// drowning the log in monitoring noise.
+func accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := genRequestID()
+		w.Header().Set(requestIDHeader, reqID)
+		lrw := &loggingResponseWriter{ResponseWriter: w}
+		start := time.Now()
+		next.ServeHTTP(lrw, r)
+		if r.URL.Path == "/api/health" || r.URL.Path == "/api/version" {
+			return
+		}
+		status := lrw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		accessLogger.LogAttrs(r.Context(), slog.LevelInfo, "request",
+			slog.String("req_id", reqID),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.String("query", r.URL.RawQuery),
+			slog.Int("status", status),
+			slog.Int64("bytes", atomic.LoadInt64(&lrw.bytes)),
+			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			slog.String("remote", remoteAddr(r)),
+		)
+	})
+}
+
+// remoteAddr prefers the proxy-supplied client address when present,
+// since the stack is meant to sit behind Caddy.
+func remoteAddr(r *http.Request) string {
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		// May be a comma-separated list; first entry is the
+		// original client.
+		if i := strings.Index(v, ","); i >= 0 {
+			return strings.TrimSpace(v[:i])
+		}
+		return strings.TrimSpace(v)
+	}
+	return r.RemoteAddr
+}
+
+// recoverPanics wraps the entire handler chain. Without it a panic
+// surfaces as Go's default net/http error log, which is unhelpful
+// when chasing a problem from inside a container. The handler returns
+// a clean 500 (if the headers have not been written yet) and emits a
+// structured log line including the panic value and a stack trace.
+func recoverPanics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				return
+			}
+			reqID := w.Header().Get(requestIDHeader)
+			accessLogger.LogAttrs(r.Context(), slog.LevelError, "panic",
+				slog.String("req_id", reqID),
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+				slog.Any("panic", rec),
+				slog.String("stack", string(debug.Stack())),
+			)
+			// If the handler has not started writing the response,
+			// give the client a clean 500. Otherwise we can only
+			// close the connection.
+			if !headersWritten(w) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// headersWritten is best-effort: when accessLog has wrapped the
+// response, we can read the recorded status; otherwise we assume
+// headers may already be on the wire.
+func headersWritten(w http.ResponseWriter) bool {
+	if lrw, ok := w.(*loggingResponseWriter); ok {
+		return lrw.status != 0
+	}
+	return true
+}
+
+// sanityCheckDB refuses to start if the DB has no docs - almost
+// always indicates a wrong -d path or a forgotten bundle-docs run.
+// Logs the counts otherwise so operators can confirm at a glance
+// what data is being served.
+func sanityCheckDB(db *sql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var docs, chunks int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM docs`).Scan(&docs); err != nil {
+		return fmt.Errorf("read docs count: %w", err)
+	}
+	// chunks table is only present when semantic-index has run; we
+	// tolerate its absence by treating any error as "no chunks".
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM chunks`).Scan(&chunks); err != nil {
+		chunks = 0
+	}
+	if docs == 0 {
+		return fmt.Errorf("docs table is empty - run `bundle-docs` to populate the database first")
+	}
+	log.Printf("docsearch serve: db ready with %d docs, %d chunks", docs, chunks)
+	return nil
+}
+
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -374,13 +603,35 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(indexHTML)
 }
 
-func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	// vector_ready is enough for the UI; embedding_url is operator
-	// configuration and gratuitous to leak.
-	writeJSON(w, http.StatusOK, map[string]any{
+func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Actually probe the DB rather than reporting blanket "ok". A
+	// web container with a corrupt or missing file would otherwise
+	// keep absorbing user requests behind Caddy's health check.
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	body := map[string]any{
 		"status":       "ok",
 		"vector_ready": s.vectorReady,
-	})
+	}
+
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM docs`).Scan(&n); err != nil {
+		body["status"] = "down"
+		body["db"] = "error"
+		writeJSON(w, http.StatusServiceUnavailable, body)
+		return
+	}
+	body["db"] = "ok"
+	body["docs"] = n
+
+	// vector_ready=false isn't fatal - FTS still works. Report
+	// degraded but stay in rotation (200) so the proxy keeps
+	// sending us traffic.
+	if !s.vectorReady {
+		body["status"] = "degraded"
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *server) handleVersion(w http.ResponseWriter, _ *http.Request) {
@@ -507,7 +758,9 @@ func (s *server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		text    string
 		file    string
 	)
-	err = s.db.QueryRowContext(r.Context(), `
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	err = s.db.QueryRowContext(ctx, `
 		SELECT c.id, d.title, c.heading, c.anchor, d.path, c.text, COALESCE(src.file, '')
 		FROM chunks c
 		JOIN documents d ON d.id = c.document_id
