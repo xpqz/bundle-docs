@@ -409,13 +409,18 @@ the docs is an image rebuild plus a redeploy.
 ### Quick start
 
 ```bash
-make refresh
+make refresh        # build DB inside Docker, build images, recreate containers
+make verify         # post-deploy smoke (health, ⎕IO -> Index Origin, /api/version)
 # or equivalently:
 #   make db        # deploy/dyalog-docs.db, built inside Docker (no host Go/Python needed)
 #   make images    # docsearch-web + docsearch-embedder OCI images
 #   make up        # docker compose up -d
 # browse http://localhost:8080
 ```
+
+Day-two operations (rollback, broken-search triage, embedder
+recovery, scaling) live in
+[`deploy/RUNBOOK.md`](deploy/RUNBOOK.md).
 
 Scale: `docker compose up -d --scale web=5`.
 
@@ -476,6 +481,8 @@ Current security posture of `docsearch serve` as shipped in the
 | Concern | State |
 |---|---|
 | Startup sanity | At boot, `SELECT count(*) FROM docs` and `SELECT count(*) FROM chunks` run with a 3 s timeout. Process refuses to start if `docs` is empty (almost always indicates a wrong `-d` path) and logs the counts otherwise. |
+| Embedding model consistency | The semantic indexer records the embedding model name into `meta.embedding_model`. At serve startup, if the DB's recorded model differs from the configured `-embedding-model`, the process refuses to start (vector queries against mismatched models silently return garbage). |
+| Post-deploy smoke | `make verify` (`deploy/verify.sh`) probes `/api/health`, runs a canonical `⎕IO` search, and reads `/api/version`. Retries the search up to 5× with 3 s gaps to absorb embedder cold-start. Exits non-zero on any deviation. |
 | Liveness probe | `GET /api/health` actually queries the database (`SELECT count(*) FROM docs` with a 2 s timeout). Returns `503 status=down` if the DB is unreachable; `200 status=ok` if everything works; `200 status=degraded` when the DB is fine but `vector_ready=false` so the proxy keeps the replica in rotation for FTS-only traffic. |
 | Per-request timeouts | `/api/search` runs with a 30 s context deadline; `/api/chunk/<id>` with 5 s; `/api/health` with 2 s. Client `AbortController` disconnects also propagate via `r.Context()` cancellation. |
 | Concurrent reads | SQLite connection pool capped at 8 open connections. `sqlite-vec` is loaded automatically on every new connection through a `ConnectHook`-backed driver, so multiple search requests don't serialise on a single pinned connection. |
@@ -510,6 +517,25 @@ in-network callers.
 | TLS | Not configured. Internal docker traffic only. |
 | Authentication / authorization | None. The trust boundary is the docker network. A compromised `web` container can reach `/embed`, but the allowlist + input caps bound the damage. |
 | Rate limiting | None. |
+
+## Continuous integration
+
+Two workflows under [`.github/workflows/`](.github/workflows/):
+
+- [`test.yml`](.github/workflows/test.yml) — runs `make vet` and
+  `make test-go` (all three Go build configurations) plus the
+  Python embedder tests on every push and PR. ~3 minutes.
+- [`refresh-docs.yml`](.github/workflows/refresh-docs.yml) — weekly
+  cron (Mondays 06:00 UTC) and manual `workflow_dispatch`. Rebuilds
+  the DB and pushes dated images (`docsearch-web:YYYY-MM-DD`,
+  `docsearch-embedder:YYYY-MM-DD`) plus `:latest` to GHCR. After it
+  runs, deploy hosts just need `docker compose pull && up -d` to
+  ship the refresh.
+
+Dependabot is configured in [`dependabot.yml`](.github/dependabot.yml)
+for Go modules, pip, Docker base images, and the workflow actions
+themselves. Minor + patch updates land as one grouped PR per
+ecosystem per week.
 
 ## Releases
 

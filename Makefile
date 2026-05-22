@@ -113,6 +113,10 @@ status:  ## ps + healthchecks
 
 refresh: db images restart  ## full rebuild + redeploy (db -> images -> recreate)
 
+.PHONY: verify
+verify:  ## post-deploy smoke: probe /api/health, /api/search ⎕IO, /api/version
+	@deploy/verify.sh
+
 # ---------- housekeeping ------------------------------------------------------
 
 .PHONY: clean fmt vet

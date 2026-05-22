@@ -55,6 +55,7 @@ func IndexDatabase(ctx context.Context, db *sql.DB, embedder Embedder, options I
 
 	seenDocuments := make(map[string]bool)
 	stats := IndexStats{}
+	var modelName string
 	for _, doc := range sourceDocs {
 		if err := ctx.Err(); err != nil {
 			return stats, err
@@ -92,14 +93,27 @@ func IndexDatabase(ctx context.Context, db *sql.DB, embedder Embedder, options I
 			chunks[chunk.Ordinal] = chunk
 			stats.Chunks++
 		}
-		if err := embedAndStore(ctx, db, embedder, chunks, documentID, options); err != nil {
+		seen, err := embedAndStore(ctx, db, embedder, chunks, documentID, options)
+		if err != nil {
 			return stats, err
+		}
+		if seen != "" {
+			modelName = seen
 		}
 		stats.Embeddings += len(chunks)
 	}
 
 	if err := removeDeletedDocuments(db, seenDocuments); err != nil {
 		return stats, err
+	}
+
+	// Record what model produced these embeddings so docsearch serve
+	// can refuse to query them with a mismatched model and silently
+	// return garbage.
+	if modelName != "" {
+		if err := semanticstore.SetMeta(db, "embedding_model", modelName); err != nil {
+			return stats, fmt.Errorf("record embedding_model in meta: %w", err)
+		}
 	}
 	return stats, nil
 }
@@ -147,7 +161,11 @@ func upsertFTS(db *sql.DB, chunkID int64, title, heading, text string) error {
 	return nil
 }
 
-func embedAndStore(ctx context.Context, db *sql.DB, embedder Embedder, chunks []MarkdownChunk, documentID int64, options IndexOptions) error {
+// embedAndStore embeds and persists vectors for one document's
+// chunks. The returned modelName is the value the embedder reported
+// in its response (used by IndexDatabase to record provenance).
+func embedAndStore(ctx context.Context, db *sql.DB, embedder Embedder, chunks []MarkdownChunk, documentID int64, options IndexOptions) (string, error) {
+	var modelName string
 	for start := 0; start < len(chunks); start += options.BatchSize {
 		end := start + options.BatchSize
 		if end > len(chunks) {
@@ -160,25 +178,28 @@ func embedAndStore(ctx context.Context, db *sql.DB, embedder Embedder, chunks []
 		}
 		batch, err := embedder.Embed(ctx, texts)
 		if err != nil {
-			return fmt.Errorf("embed chunks for document_id=%d batch=%d: %w", documentID, start/options.BatchSize, err)
+			return modelName, fmt.Errorf("embed chunks for document_id=%d batch=%d: %w", documentID, start/options.BatchSize, err)
+		}
+		if batch.Model != "" {
+			modelName = batch.Model
 		}
 		if len(batch.Embeddings) != len(batchChunks) {
-			return fmt.Errorf("embedding count %d does not match chunk count %d", len(batch.Embeddings), len(batchChunks))
+			return modelName, fmt.Errorf("embedding count %d does not match chunk count %d", len(batch.Embeddings), len(batchChunks))
 		}
 		for i, vector := range batch.Embeddings {
 			if len(vector) != options.VectorDims || batch.Dimensions != options.VectorDims {
-				return fmt.Errorf("embedding dimensions = vector:%d response:%d, want %d", len(vector), batch.Dimensions, options.VectorDims)
+				return modelName, fmt.Errorf("embedding dimensions = vector:%d response:%d, want %d", len(vector), batch.Dimensions, options.VectorDims)
 			}
 			chunkID, err := lookupChunkID(db, documentID, batchChunks[i].Ordinal)
 			if err != nil {
-				return err
+				return modelName, err
 			}
 			if err := semanticstore.UpsertChunkVector(db, chunkID, encodeVectorJSON(vector)); err != nil {
-				return fmt.Errorf("store vector for chunk %d: %w", chunkID, err)
+				return modelName, fmt.Errorf("store vector for chunk %d: %w", chunkID, err)
 			}
 		}
 	}
-	return nil
+	return modelName, nil
 }
 
 func lookupChunkID(db *sql.DB, documentID int64, ordinal int) (int64, error) {

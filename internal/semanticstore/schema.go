@@ -97,6 +97,42 @@ func VectorUpsertSQL() string {
 	return "INSERT INTO chunk_vec(rowid, embedding) VALUES (?, ?);"
 }
 
+// SetMeta writes a meta key/value, creating the meta table if
+// missing. Used by bundle-docs at build time, by the semantic
+// indexer to record the embedding model, and by anything else that
+// needs to durably attach "what produced this database" provenance.
+func SetMeta(db *sql.DB, key, value string) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("ensure meta table: %w", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value,
+	); err != nil {
+		return fmt.Errorf("write meta %s: %w", key, err)
+	}
+	return nil
+}
+
+// GetMeta reads a meta value. Returns ok=false (no error) when the
+// table or key does not exist, so callers can ask about provenance
+// against older databases without aborting.
+func GetMeta(db *sql.DB, key string) (string, bool, error) {
+	var value string
+	err := db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		// "no such table: meta" - return ok=false, not an error.
+		if strings.Contains(err.Error(), "no such table") {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return value, true, nil
+}
+
 // UpsertChunkVector replaces the embedding for a chunk, working around
 // sqlite-vec's lack of ON CONFLICT support on vec0 tables.
 func UpsertChunkVector(db *sql.DB, chunkID int64, embedding string) error {

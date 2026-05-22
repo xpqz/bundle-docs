@@ -342,6 +342,41 @@ func quoteFTS(q string) string {
 	return `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
 }
 
+func TestSetMetaAndGetMetaRoundTrip(t *testing.T) {
+	db := openMemoryDB(t)
+
+	got, ok, err := GetMeta(db, "embedding_model")
+	if err != nil {
+		t.Fatalf("GetMeta on missing table: %v", err)
+	}
+	if ok || got != "" {
+		t.Fatalf("expected ok=false on missing table; got ok=%v val=%q", ok, got)
+	}
+
+	if err := SetMeta(db, "embedding_model", "BAAI/bge-small-en-v1.5"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	got, ok, err = GetMeta(db, "embedding_model")
+	if err != nil || !ok || got != "BAAI/bge-small-en-v1.5" {
+		t.Fatalf("after set: got=%q ok=%v err=%v", got, ok, err)
+	}
+
+	// Idempotent: rewriting the same key updates value, not creates dupes.
+	if err := SetMeta(db, "embedding_model", "other-model"); err != nil {
+		t.Fatalf("SetMeta (update): %v", err)
+	}
+	got, _, _ = GetMeta(db, "embedding_model")
+	if got != "other-model" {
+		t.Fatalf("update should overwrite, got %q", got)
+	}
+
+	// Missing key in existing table: ok=false, no error.
+	got, ok, err = GetMeta(db, "no-such-key")
+	if err != nil || ok || got != "" {
+		t.Fatalf("missing key: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
 // TestOpenWithVectorAllowsConcurrentReaders confirms the
 // ConnectHook-backed driver lets multiple goroutines hold their
 // own connections at the same time, which is what

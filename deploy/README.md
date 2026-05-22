@@ -17,6 +17,12 @@ image, so containers have no volumes, no shared state, and no
 consistency model to worry about. Updating the docs is an image
 rebuild + redeploy.
 
+## Operating the stack
+
+Day-two recipes (what to do when things break, how to roll back,
+how to read the logs, how to triage user-reported issues) live in
+[`RUNBOOK.md`](RUNBOOK.md).
+
 ## Layout
 
 | File | Role |

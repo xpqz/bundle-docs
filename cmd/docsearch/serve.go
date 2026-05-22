@@ -151,6 +151,25 @@ func runServe(args []string) {
 		log.Fatalf("docsearch serve: database sanity check failed: %v", err)
 	}
 
+	// Model consistency: if the DB knows what model produced its
+	// vectors, fail loud when the configured -embedding-model
+	// doesn't match. Same dimensions + different weights would
+	// otherwise silently return garbage results.
+	if vectorReady {
+		if dbModel, ok, err := semanticstore.GetMeta(db, "embedding_model"); err != nil {
+			log.Printf("WARN: cannot read meta.embedding_model: %v", err)
+		} else if ok && dbModel != *embeddingModel {
+			log.Fatalf(
+				"docsearch serve: embedding model mismatch\n"+
+					"  database was indexed with: %q\n"+
+					"  configured -embedding-model: %q\n"+
+					"  vector/hybrid search would return garbage. "+
+					"Re-run with -embedding-model=%q, or re-index with `docsearch semantic-index`.",
+				dbModel, *embeddingModel, dbModel,
+			)
+		}
+	}
+
 	srv := &server{
 		db:          db,
 		vectorDims:  *vectorDims,

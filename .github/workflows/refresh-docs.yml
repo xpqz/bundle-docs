@@ -1,0 +1,108 @@
+# Scheduled refresh of the bundled Dyalog docs.
+#
+# On the configured cron (and on manual dispatch), this workflow:
+#   1. Builds the populated dyalog-docs.db inside Docker, against
+#      the requested upstream ref (default: tip of main).
+#   2. Builds docsearch-web + docsearch-embedder images for
+#      linux/amd64 and linux/arm64.
+#   3. Pushes them to GHCR under two tags:
+#        - the resolved date (e.g. 2026-05-22), for explicit pinning
+#        - "latest", for `docker compose pull && up -d` deploys
+#
+# Deploy hosts then run:
+#     REGISTRY=ghcr.io/<owner> docker compose pull
+#     REGISTRY=ghcr.io/<owner> docker compose up -d
+#     make verify
+#
+# Triggers:
+#   - Monday 06:00 UTC (weekly).
+#   - Manual: Actions tab → "refresh-docs" → Run workflow. Optionally
+#     pin to a specific upstream docs commit.
+#
+# The workflow needs `packages: write` to push to ghcr.io. The
+# default GITHUB_TOKEN already has that permission for repositories
+# under the same owner.
+
+name: refresh-docs
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      docs_ref:
+        description: 'Upstream docs git ref (commit / tag / branch). Empty = tip of main.'
+        required: false
+        type: string
+      platforms:
+        description: 'Comma-separated docker platforms.'
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
+      PLATFORMS: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+      DOCS_REF: ${{ inputs.docs_ref }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Compute tag from date
+        id: tag
+        run: echo "tag=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build dyalog-docs.db
+        env:
+          BUILD_VERSION: ${{ github.sha }}
+        run: make db
+
+      - name: Build + push images (dated tag)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          BUILD_VERSION: ${{ github.sha }}
+          PUSH: "1"
+        run: deploy/build-images.sh
+
+      - name: Tag + push as "latest"
+        env:
+          TAG: latest
+          BUILD_VERSION: ${{ github.sha }}
+          PUSH: "1"
+        run: deploy/build-images.sh
+
+      - name: Report
+        run: |
+          echo "Built and pushed:"
+          echo "  ${REGISTRY}/docsearch-web:${{ steps.tag.outputs.tag }}"
+          echo "  ${REGISTRY}/docsearch-embedder:${{ steps.tag.outputs.tag }}"
+          echo "  ${REGISTRY}/docsearch-web:latest"
+          echo "  ${REGISTRY}/docsearch-embedder:latest"
+          echo "  docs_ref: ${DOCS_REF:-tip-of-main}"
+          echo
+          echo "Deploy with:"
+          echo "  REGISTRY=${REGISTRY} TAG=${{ steps.tag.outputs.tag }} docker compose pull"
+          echo "  REGISTRY=${REGISTRY} TAG=${{ steps.tag.outputs.tag }} docker compose up -d"

@@ -1,0 +1,41 @@
+# Build + test on push and PR. Fast feedback (~3 min): runs the Go
+# test suite across all three tag configurations (no-tag, fts5,
+# fts5 semantic) plus the Python tests.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet (all tag combos)
+        run: make vet
+      - name: go test (all tag combos)
+        run: make test-go
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: install embedder deps
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r scripts/requirements-embedding-server.txt
+      - name: run unittest
+        run: .venv/bin/python -m unittest scripts/test_embedding_server.py -v

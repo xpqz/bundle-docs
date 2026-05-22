@@ -93,6 +93,33 @@ func TestIndexDatabasePopulatesDocumentsChunksFTSAndVectors(t *testing.T) {
 	}
 }
 
+func TestIndexDatabaseRecordsEmbeddingModelInMeta(t *testing.T) {
+	db := openIndexDB(t)
+	seedDocsTable(t, db)
+	insertDoc(t, db, "Language / Functions", "language/functions.md", "Functions",
+		"# Functions\n\nIntro paragraph here.", false)
+
+	embedder := &fakeEmbedder{}
+	if _, err := IndexDatabase(context.Background(), db, embedder, IndexOptions{
+		Chunk:               ChunkOptions{MaxTokens: 80},
+		BatchSize:           10,
+		VectorDims:          3,
+		UseFallbackVectorDB: true,
+	}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	got, ok, err := semanticstore.GetMeta(db, "embedding_model")
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if !ok {
+		t.Fatalf("embedding_model was not recorded")
+	}
+	if got != DefaultEmbeddingModel {
+		t.Fatalf("embedding_model = %q, want %q", got, DefaultEmbeddingModel)
+	}
+}
+
 func TestIndexDatabaseEmbedsTitleAndHeadingWithChunkBody(t *testing.T) {
 	db := openIndexDB(t)
 	seedDocsTable(t, db)

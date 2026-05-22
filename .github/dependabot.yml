@@ -1,0 +1,60 @@
+# Automated dependency updates. Reviews maybe one PR per quarter at
+# this project's update cadence. The grouped configs keep PR noise
+# low: minor + patch updates land in a single bundled PR per
+# ecosystem each week.
+
+version: 2
+updates:
+  # Go modules (docsearch + bundle-docs).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      gomod:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - dependencies
+      - go
+
+  # Python deps for the embedding server.
+  - package-ecosystem: pip
+    directory: /scripts
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      pip:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - dependencies
+      - python
+
+  # Base images referenced from the Dockerfiles in deploy/.
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - docker
+
+  # The workflows themselves (action versions in .github/workflows).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - ci
