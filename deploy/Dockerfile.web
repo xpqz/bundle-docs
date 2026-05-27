@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1.7
+#
+# docsearch web frontend. Stateless: the SQLite database (FTS5 +
+# semantic tables) and the sqlite-vec extension are both baked into
+# the image so a container needs no volumes, no init, and no DB
+# coordination. Scale horizontally with `docker compose up --scale
+# web=N`.
+#
+# Build (from the repo root):
+#   docker buildx build --platform linux/arm64 \
+#       -f deploy/Dockerfile.web -t docsearch-web:<tag> --load .
+#
+# Expects deploy/dyalog-docs.db to be present in the build context.
+# Produce it with deploy/build-db.sh.
+
+# -----------------------------------------------------------------
+# Stage 1: compile docsearch with the fts5 + semantic build tags.
+# CGO is required by mattn/go-sqlite3.
+# -----------------------------------------------------------------
+FROM golang:1.24-bookworm AS build
+WORKDIR /src
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 go build \
+        -tags "fts5 semantic" \
+        -trimpath \
+        -ldflags "-s -w" \
+        -o /out/docsearch ./cmd/docsearch
+
+# -----------------------------------------------------------------
+# Stage 2: minimal runtime image.
+# -----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl tar \
+ && rm -rf /var/lib/apt/lists/*
+
+# Fetch and install the sqlite-vec loadable extension for this
+# image's architecture. install-sqlite-vec.sh detects via uname so
+# this works for both linux/arm64 and linux/amd64.
+COPY scripts/install-sqlite-vec.sh /tmp/install-sqlite-vec.sh
+RUN INSTALL_DIR=/usr/local/lib sh /tmp/install-sqlite-vec.sh \
+ && rm /tmp/install-sqlite-vec.sh
+
+# curl stays in the image: the compose healthcheck uses it to probe
+# /api/health. (tar is an essential package and can't be purged
+# anyway, so there's nothing meaningful to clean up here.)
+
+COPY --from=build /out/docsearch /usr/local/bin/docsearch
+COPY deploy/dyalog-docs.db /var/lib/docsearch/dyalog-docs.db
+
+# Defaults consumed by docsearch serve; can be overridden via
+# environment in compose.
+ENV DOCSEARCH_VECTOR_EXTENSION=/usr/local/lib/vec0.so \
+    DOCSEARCH_EMBEDDING_URL=http://embedder:8000/embed
+
+EXPOSE 8080
+
+# Run as a non-root user. The DB and the extension are read-only in
+# the image so we don't need write access anywhere.
+RUN useradd -r -u 10001 -s /usr/sbin/nologin docsearch
+USER docsearch
+
+CMD ["docsearch", "serve", "-addr", "0.0.0.0:8080", "-d", "/var/lib/docsearch/dyalog-docs.db"]

@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1.7
+#
+# Reproducible, host-toolchain-free build of dyalog-docs.db.
+#
+# Produces the populated database (docs + FTS5 + semantic chunks
+# + vectors) as a build artefact. Extract it with buildx local
+# output:
+#
+#   docker buildx build \
+#     --platform linux/arm64 \
+#     --output type=local,dest=deploy/ \
+#     -f deploy/Dockerfile.dbbuilder \
+#     --build-arg DOCS_REF=<sha-or-empty> \
+#     .
+#
+# After this, deploy/dyalog-docs.db is on the host and ready to be
+# baked into the docsearch-web image via Dockerfile.web.
+#
+# Hosts only need Docker (and buildx). No local Go, no local Python,
+# no local sqlite-vec.
+
+# ---------------------------------------------------------------
+# Stage 1: compile Go binaries.
+# ---------------------------------------------------------------
+FROM golang:1.24-bookworm AS gobuild
+WORKDIR /src
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG BUILD_VERSION=dev
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=1 go build \
+        -tags "fts5 semantic" \
+        -trimpath \
+        -ldflags "-s -w -X 'main.buildVersion=${BUILD_VERSION}' -X 'main.buildTime=${BUILD_TIME}'" \
+        -o /out/bundle-docs . \
+ && CGO_ENABLED=1 go build \
+        -tags "fts5 semantic" \
+        -trimpath \
+        -ldflags "-s -w -X 'main.buildVersion=${BUILD_VERSION}' -X 'main.buildTime=${BUILD_TIME}'" \
+        -o /out/docsearch ./cmd/docsearch
+
+# ---------------------------------------------------------------
+# Stage 2: run the bundle-docs -> embedder -> semantic-index
+# pipeline against the upstream Dyalog repo. Writes /db/dyalog-docs.db.
+# ---------------------------------------------------------------
+FROM python:3.11-slim-bookworm AS dbbuild
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/huggingface
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        git ca-certificates curl tar sqlite3 \
+ && rm -rf /var/lib/apt/lists/*
+
+# sqlite-vec extension (uname-detected platform: linux/arm64 or
+# linux/amd64). The install script lives under scripts/ in the build
+# context, so we copy it in standalone.
+COPY scripts/install-sqlite-vec.sh /tmp/install-sqlite-vec.sh
+RUN INSTALL_DIR=/usr/local/lib sh /tmp/install-sqlite-vec.sh \
+ && rm /tmp/install-sqlite-vec.sh
+
+# Embedding server: pip deps and pre-download model weights so the
+# in-build embedder starts in ~5 s rather than ~30 s.
+COPY scripts/requirements-embedding-server.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt \
+ && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')" \
+ && rm /tmp/requirements.txt
+COPY scripts/embedding-server.py /opt/embedder/embedding-server.py
+
+# Drop in the Go binaries from stage 1.
+COPY --from=gobuild /out/bundle-docs /out/docsearch /usr/local/bin/
+
+# Pipeline script.
+COPY deploy/build-db-in-docker.sh /opt/build-db.sh
+RUN chmod +x /opt/build-db.sh
+
+ARG DOCS_REF=""
+RUN DOCS_REF="${DOCS_REF}" /opt/build-db.sh
+
+# ---------------------------------------------------------------
+# Stage 3: ship just the DB so buildx --output type=local,dest=deploy
+# drops a single file on the host.
+# ---------------------------------------------------------------
+FROM scratch AS db
+COPY --from=dbbuild /db/dyalog-docs.db /dyalog-docs.db

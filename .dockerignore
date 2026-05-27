@@ -1,0 +1,25 @@
+# Anything that does not belong in a docker build context. The
+# COPY in deploy/Dockerfile.web explicitly re-includes the baked DB.
+
+.git/
+.skis/
+.claude/
+.venv/
+__pycache__/
+**/__pycache__/
+
+# Local build artefacts
+/bin/
+/bundle-docs
+/docsearch
+
+# Databases - the runtime image gets the DB through an explicit
+# COPY from deploy/, which is re-included below.
+*.db
+
+# Re-include the deployment DB if it has been produced.
+!deploy/dyalog-docs.db
+
+# Misc local files
+docs/evaluation/*.txt
+*.log

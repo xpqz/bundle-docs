@@ -1,0 +1,76 @@
+# docsearch — on-prem deploy bundle (pull pre-built images, no build).
+#
+# This is the self-contained compose file handed to whoever operates
+# the host. It pulls finished images from GHCR; there is NO build
+# context, so the git repo, Go, Python and sqlite-vec are all
+# unnecessary here. The only host requirement is Docker with the
+# compose plugin.
+#
+# Three services:
+#   embedder  one FastAPI process with the sentence-transformers
+#             model preloaded. One replica serves the whole user
+#             base (debounced typing on the client keeps load low).
+#   web       stateless docsearch. The SQLite DB (FTS5 + semantic
+#             vectors) and the sqlite-vec extension are baked into
+#             the image, so a container needs no volumes and no init.
+#   proxy     Caddy on a host port. Round-robins across web replicas
+#             and health-checks /api/health. Plain HTTP — front it
+#             with your own reverse proxy / load balancer for TLS.
+#
+# Usage (see INSTALL.md):
+#   docker compose pull
+#   docker compose up -d
+#   ./verify.sh
+
+name: docsearch
+
+services:
+  embedder:
+    image: ${REGISTRY:-ghcr.io/xpqz}/docsearch-embedder:${TAG:-latest}
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=2).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # The model + torch sit around 1 GB resident.
+          memory: 2g
+
+  web:
+    image: ${REGISTRY:-ghcr.io/xpqz}/docsearch-web:${TAG:-latest}
+    expose:
+      - "8080"
+    environment:
+      DOCSEARCH_EMBEDDING_URL: http://embedder:8000/embed
+    depends_on:
+      embedder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      replicas: ${WEB_REPLICAS:-2}
+      resources:
+        limits:
+          memory: 256m
+
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      # Host port -> Caddy :80. Point your TLS-terminating proxy here.
+      - "${HOST_PORT:-8080}:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+    restart: unless-stopped

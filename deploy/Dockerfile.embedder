@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+#
+# docsearch embedding server (FastAPI + uvicorn + sentence-transformers).
+# The model weights are pre-downloaded into the image so a fresh
+# container is ready in ~5s instead of ~30s.
+#
+# Build (from the repo root):
+#   docker buildx build --platform linux/arm64 \
+#       -f deploy/Dockerfile.embedder -t docsearch-embedder:<tag> --load .
+
+FROM python:3.11-slim-bookworm
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/huggingface
+
+WORKDIR /app
+
+COPY scripts/requirements-embedding-server.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt
+
+# Pre-download model weights (~130 MB) so the first request after
+# container start does not wait on a Hugging Face round trip. The
+# cache lives at $HF_HOME so it survives layer changes above.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
+
+COPY scripts/embedding-server.py /app/embedding-server.py
+
+EXPOSE 8000
+
+RUN useradd -r -u 10001 -s /usr/sbin/nologin embedder \
+ && chown -R embedder:embedder /opt/huggingface /app
+USER embedder
+
+# --host 0.0.0.0 so other containers can reach it.
+CMD ["python", "/app/embedding-server.py", "--host", "0.0.0.0", "--port", "8000"]
