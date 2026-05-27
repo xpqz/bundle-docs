@@ -54,7 +54,10 @@ services:
       embedder:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/api/health >/dev/null"]
+      # curl is present in the web image (used to fetch sqlite-vec at
+      # build time); -f makes a 503 from /api/health count as
+      # unhealthy.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3

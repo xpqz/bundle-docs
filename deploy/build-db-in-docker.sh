@@ -54,6 +54,10 @@ kill "$EMBEDDER_PID" 2>/dev/null || true
 wait "$EMBEDDER_PID" 2>/dev/null || true
 trap - EXIT
 
-# Quick sanity probe so the build fails loudly on an empty DB.
-COUNTS=$(sqlite3 "$DB_OUT" "SELECT (SELECT COUNT(*) FROM docs)||' docs, '||(SELECT COUNT(*) FROM chunks)||' chunks, '||(SELECT COUNT(*) FROM chunk_vec)||' embeddings'")
+# Quick sanity probe so the build fails loudly on an empty DB. Only
+# query the plain tables: chunk_vec is a sqlite-vec vec0 virtual
+# table and the bare sqlite3 CLI can't open it ("no such module:
+# vec0"). The embedding count is already reported by
+# `docsearch semantic-index` above.
+COUNTS=$(sqlite3 "$DB_OUT" "SELECT (SELECT COUNT(*) FROM docs)||' docs, '||(SELECT COUNT(*) FROM chunks)||' chunks'")
 echo "[build-db] OK: $COUNTS"

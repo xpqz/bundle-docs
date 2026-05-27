@@ -5,6 +5,7 @@ package semanticindex
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestChunkMarkdownSplitsByHeadingsAndKeepsMetadata(t *testing.T) {
@@ -106,6 +107,38 @@ func TestDefaultChunkOptionsUsePlannedTokenBudget(t *testing.T) {
 
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
+}
+
+func TestEmbeddingTextClampsOversizedChunks(t *testing.T) {
+	// A chunk whose body is a giant HTML table: few "tokens" but
+	// tens of thousands of characters. Must come back clamped under
+	// the embedder's input cap.
+	body := strings.Repeat("<td class=\"Dyalog\">x</td>\n", 5000) // ~125k chars
+	chunk := MarkdownChunk{
+		DocumentTitle: "Format Date-time R←X(1200⌶)Y",
+		Heading:       "Formatting Pattern",
+		Text:          body,
+	}
+	got := EmbeddingText(chunk)
+	if n := len([]rune(got)); n > MaxEmbeddingTextChars {
+		t.Fatalf("EmbeddingText returned %d chars, want <= %d", n, MaxEmbeddingTextChars)
+	}
+	// The canonical prefix (title) must survive the clamp.
+	if !strings.HasPrefix(got, "Format Date-time R←X(1200⌶)Y") {
+		t.Fatalf("clamp dropped the title prefix: %q...", got[:40])
+	}
+}
+
+func TestClampCharsNeverSplitsRunes(t *testing.T) {
+	// All multi-byte runes; clamping must not produce invalid UTF-8.
+	s := strings.Repeat("⎕", 100)
+	got := clampChars(s, 10)
+	if utf8len := len([]rune(got)); utf8len != 10 {
+		t.Fatalf("clampChars rune count = %d, want 10", utf8len)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("clampChars produced invalid UTF-8: %q", got)
+	}
 }
 
 func TestEmbeddingTextPrependsTitleAndHeading(t *testing.T) {

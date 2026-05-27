@@ -36,6 +36,17 @@ func DefaultChunkOptions() ChunkOptions {
 	return ChunkOptions{MaxTokens: 500}
 }
 
+// MaxEmbeddingTextChars bounds the length (in Unicode code points) of
+// the string handed to the embedder. The chunker splits by token
+// (whitespace-separated word) budget, but a dense HTML table has few
+// words and many characters, so a chunk can sit under the token
+// budget yet run to tens of thousands of characters. The embedding
+// model (BAAI/bge-small-en-v1.5) only consumes ~512 tokens, so the
+// tail is wasted anyway; clamping here keeps us comfortably under the
+// embedding server's per-text input cap (8192) without losing signal
+// the model would have used.
+const MaxEmbeddingTextChars = 8000
+
 // EmbeddingText is the string sent to the embedder for a chunk.
 //
 // The chunk body alone is often missing the canonical name of the page
@@ -44,6 +55,10 @@ func DefaultChunkOptions() ChunkOptions {
 // section heading gives the model the symbol and the plain-English name
 // to anchor natural-language queries against. The heading is omitted
 // when it is identical to the title or a substring of it.
+//
+// The result is clamped to MaxEmbeddingTextChars on a rune boundary so
+// chunks with large embedded HTML (tables, etc.) don't blow past the
+// embedder's input cap.
 func EmbeddingText(chunk MarkdownChunk) string {
 	var b strings.Builder
 	title := strings.TrimSpace(chunk.DocumentTitle)
@@ -57,7 +72,20 @@ func EmbeddingText(chunk MarkdownChunk) string {
 		b.WriteByte('\n')
 	}
 	b.WriteString(chunk.Text)
-	return b.String()
+	return clampChars(b.String(), MaxEmbeddingTextChars)
+}
+
+// clampChars truncates s to at most maxChars Unicode code points,
+// never splitting a multi-byte rune.
+func clampChars(s string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxChars {
+		return s
+	}
+	return string(runes[:maxChars])
 }
 
 func ChunkMarkdown(doc SourceDocument, options ChunkOptions) []MarkdownChunk {

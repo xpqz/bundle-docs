@@ -50,10 +50,9 @@ COPY scripts/install-sqlite-vec.sh /tmp/install-sqlite-vec.sh
 RUN INSTALL_DIR=/usr/local/lib sh /tmp/install-sqlite-vec.sh \
  && rm /tmp/install-sqlite-vec.sh
 
-# Drop curl + tar now that the extension is on disk.
-RUN apt-get update \
- && apt-get purge -y --auto-remove curl tar \
- && rm -rf /var/lib/apt/lists/*
+# curl stays in the image: the compose healthcheck uses it to probe
+# /api/health. (tar is an essential package and can't be purged
+# anyway, so there's nothing meaningful to clean up here.)
 
 COPY --from=build /out/docsearch /usr/local/bin/docsearch
 COPY deploy/dyalog-docs.db /var/lib/docsearch/dyalog-docs.db
