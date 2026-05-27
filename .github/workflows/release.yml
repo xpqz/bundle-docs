@@ -32,7 +32,7 @@ jobs:
         run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_type == 'tag' && github.ref_name || format('snapshot-{0}', steps.date.outputs.date) }}
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('snapshot-{0}', steps.date.outputs.date) }}
