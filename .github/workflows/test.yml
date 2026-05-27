@@ -33,6 +33,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: scripts/requirements-embedding-server.txt
       - name: install embedder deps
         run: |
           python -m venv .venv
