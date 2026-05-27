@@ -61,7 +61,7 @@ jobs:
         run: echo "tag=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
