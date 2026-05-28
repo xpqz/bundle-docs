@@ -35,10 +35,10 @@ on:
         required: false
         type: string
       platforms:
-        description: 'Comma-separated docker platforms.'
+        description: 'Comma-separated docker platforms. Default is amd64 only; arm64 builds the embedder image under QEMU and is too slow to fit the CI timeout.'
         required: false
         type: string
-        default: 'linux/amd64,linux/arm64'
+        default: 'linux/amd64'
 
 permissions:
   contents: read
@@ -50,7 +50,7 @@ jobs:
     timeout-minutes: 30
     env:
       REGISTRY: ghcr.io/${{ github.repository_owner }}
-      PLATFORMS: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+      PLATFORMS: ${{ inputs.platforms || 'linux/amd64' }}
       DOCS_REF: ${{ inputs.docs_ref }}
     steps:
       - name: Check out source
@@ -60,10 +60,9 @@ jobs:
         id: tag
         run: echo "tag=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: arm64
+      # Default build is linux/amd64 only (the native arch of the
+      # GitHub runner), so no QEMU setup is needed. Re-add this step
+      # if you dispatch the workflow with a non-native platform.
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
