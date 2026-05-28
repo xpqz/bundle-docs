@@ -17,7 +17,7 @@
 # Stage 1: compile docsearch with the fts5 + semantic build tags.
 # CGO is required by mattn/go-sqlite3.
 # -----------------------------------------------------------------
-FROM golang:1.24-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
 
 RUN apt-get update \
