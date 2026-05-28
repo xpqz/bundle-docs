@@ -21,11 +21,17 @@ reverse proxy / load balancer.
 
 ## Requirements
 
-- A Linux host (x86-64 or arm64 — multi-arch images are published).
+- A Linux host running on **x86-64** (the published images are
+  `linux/amd64`).
 - Docker Engine with the Compose plugin (`docker compose version`).
 - Outbound HTTPS to `ghcr.io` to pull the images (first run only).
-- ~7 GB free disk for the images; ~2.5 GB RAM headroom for the
-  embedder.
+- **Disk:** ~7 GB free for the first pull (the embedder image is
+  ~6 GB on its own). Weekly updates layer new image versions on top
+  of the old ones, so plan for ~15 GB headroom and periodically run
+  `docker image prune -a` after a `docker compose up -d` to reclaim
+  the previous tags. A `no space left on device` mid-pull means the
+  Docker storage volume needs cleaning.
+- **Memory:** ~2.5 GB headroom for the embedder process.
 - `curl` and `python3` on the host if you want to run `verify.sh`.
 
 ## Install
