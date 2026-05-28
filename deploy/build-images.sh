@@ -26,6 +26,13 @@ TAG="${TAG:-latest}"
 REGISTRY="${REGISTRY:-localhost}"
 PUSH="${PUSH:-0}"
 
+# Stamped into the docsearch binary via -ldflags so /api/version and
+# `docsearch version` report a real revision instead of "unknown".
+# Defaults are sensible for a developer local build; CI overrides
+# BUILD_VERSION with the commit SHA.
+BUILD_VERSION="${BUILD_VERSION:-$(git rev-parse --short HEAD 2>/dev/null || echo dev)}"
+BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+
 WEB_IMAGE="${REGISTRY}/docsearch-web:${TAG}"
 EMB_IMAGE="${REGISTRY}/docsearch-embedder:${TAG}"
 
@@ -34,11 +41,13 @@ if [ "$PUSH" = "1" ]; then
   out_flag="--push"
 fi
 
-echo "build-images: web -> ${WEB_IMAGE} (${PLATFORMS})"
+echo "build-images: web -> ${WEB_IMAGE} (${PLATFORMS}) version=${BUILD_VERSION}"
 docker buildx build \
     --platform "$PLATFORMS" \
     -f Dockerfile.web \
     -t "$WEB_IMAGE" \
+    --build-arg "BUILD_VERSION=$BUILD_VERSION" \
+    --build-arg "BUILD_TIME=$BUILD_TIME" \
     $out_flag \
     ..
 

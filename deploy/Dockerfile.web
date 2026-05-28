@@ -20,6 +20,13 @@
 FROM golang:1.26-bookworm AS build
 WORKDIR /src
 
+# Bake the build version + timestamp into the binary via -ldflags so
+# /api/version and `docsearch version` report something meaningful.
+# Without this main.buildVersion stays empty, the runtime falls back
+# to "unknown", and verify.sh fails its version check.
+ARG BUILD_VERSION=""
+ARG BUILD_TIME=""
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/*
@@ -31,7 +38,7 @@ COPY . .
 RUN CGO_ENABLED=1 go build \
         -tags "fts5 semantic" \
         -trimpath \
-        -ldflags "-s -w" \
+        -ldflags "-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildTime=${BUILD_TIME}" \
         -o /out/docsearch ./cmd/docsearch
 
 # -----------------------------------------------------------------
