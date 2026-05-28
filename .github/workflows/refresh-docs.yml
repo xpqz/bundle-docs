@@ -54,7 +54,7 @@ jobs:
       DOCS_REF: ${{ inputs.docs_ref }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Compute tag from date
         id: tag
