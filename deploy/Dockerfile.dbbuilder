@@ -51,7 +51,7 @@ RUN CGO_ENABLED=1 go build \
 # Stage 2: run the bundle-docs -> embedder -> semantic-index
 # pipeline against the upstream Dyalog repo. Writes /db/dyalog-docs.db.
 # ---------------------------------------------------------------
-FROM python:3.11-slim-bookworm AS dbbuild
+FROM python:3.14-slim-bookworm AS dbbuild
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \

@@ -8,7 +8,7 @@
 #   docker buildx build --platform linux/arm64 \
 #       -f deploy/Dockerfile.embedder -t docsearch-embedder:<tag> --load .
 
-FROM python:3.11-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
