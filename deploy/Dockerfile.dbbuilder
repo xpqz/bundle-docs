@@ -22,7 +22,7 @@
 # ---------------------------------------------------------------
 # Stage 1: compile Go binaries.
 # ---------------------------------------------------------------
-FROM golang:1.26-bookworm AS gobuild
+FROM golang:1.27-bookworm AS gobuild
 WORKDIR /src
 
 RUN apt-get update \
