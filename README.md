@@ -256,7 +256,10 @@ docsearch -s 'how do I define a namespace' -semantic-mode vector
 docsearch -s 'namespace reference evaluation' -semantic-mode hybrid
 ```
 
-`docsearch -r <chunk_id>` returns the chunk text for any semantic result row.
+`docsearch -r <chunk_id> -semantic-mode <mode>` returns the chunk text for any
+semantic result row. Chunk ids and plain-search document rowids are
+independent id spaces and can collide on the same number, so `-r` needs
+`-semantic-mode` set to know which table to resolve the id against.
 
 ### Environment variables
 

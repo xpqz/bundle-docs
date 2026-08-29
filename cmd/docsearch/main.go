@@ -116,6 +116,9 @@ FLAGS
   -s <string>    Search query. Matches against keywords, titles, and content
                   (in that priority order). Use '-' to read from stdin.
   -r <rowid>     Fetch and print the full content of the document with this rowid.
+                  Pair with -semantic-mode to fetch a chunk id returned by a
+                  semantic search instead of a plain-search document rowid —
+                  the two are independent id spaces and can collide.
   -l <limit>     Maximum number of search results (default: 10).
   -d <path>      Path to the SQLite database (default: %s).
   -semantic-mode <mode>
@@ -164,7 +167,7 @@ DATABASE
 	defer db.Close()
 
 	if *rowid != 0 {
-		fetchByRowid(db, *rowid)
+		fetchByRowid(db, *rowid, *semanticMode != "")
 		return
 	}
 
@@ -191,43 +194,48 @@ DATABASE
 	searchDocs(db, query, *limit)
 }
 
-func fetchByRowid(db *sql.DB, rowid int64) {
+// fetchChunkByID and fetchDocByRowid look up content in the chunks and
+// docs tables respectively. Both id spaces are independent, small,
+// monotonic integers starting near 1, so a given id routinely exists
+// in both tables pointing at unrelated pages. semantic tells us which
+// table the id actually came from (set when the caller also passed
+// -semantic-mode), so we try that one first and only fall back to the
+// other if the primary lookup comes up empty.
+func fetchChunkByID(db *sql.DB, rowid int64) (string, error) {
 	var content string
-	if semanticTablesExist(db) {
-		err := db.QueryRow("SELECT text FROM chunks WHERE id = ?", rowid).Scan(&content)
-		if err == nil {
-			fmt.Print(content)
-			return
-		}
-		if err != sql.ErrNoRows {
-			log.Fatal(err)
-		}
-	}
-	err := db.QueryRow("SELECT content FROM docs WHERE rowid = ?", rowid).Scan(&content)
-	if err != nil {
-		if err != sql.ErrNoRows && !strings.Contains(err.Error(), "no such table: docs") {
-			log.Fatal(err)
-		}
-		if err := db.QueryRow("SELECT text FROM chunks WHERE id = ?", rowid).Scan(&content); err != nil {
-			if err == sql.ErrNoRows {
-				log.Fatalf("no document or semantic chunk with rowid %d", rowid)
-			}
-			log.Fatal(err)
-		}
-	}
-	fmt.Print(content)
+	err := db.QueryRow("SELECT text FROM chunks WHERE id = ?", rowid).Scan(&content)
+	return content, err
 }
 
-func semanticTablesExist(db *sql.DB) bool {
-	var count int
-	if err := db.QueryRow(`
-		SELECT COUNT(*)
-		FROM sqlite_schema
-		WHERE name IN ('documents', 'chunks')
-	`).Scan(&count); err != nil {
-		return false
+func fetchDocByRowid(db *sql.DB, rowid int64) (string, error) {
+	var content string
+	err := db.QueryRow("SELECT content FROM docs WHERE rowid = ?", rowid).Scan(&content)
+	return content, err
+}
+
+func fetchByRowid(db *sql.DB, rowid int64, semantic bool) {
+	primary, fallback := fetchDocByRowid, fetchChunkByID
+	if semantic {
+		primary, fallback = fetchChunkByID, fetchDocByRowid
 	}
-	return count == 2
+
+	content, err := primary(db, rowid)
+	if err == nil {
+		fmt.Print(content)
+		return
+	}
+	if err != sql.ErrNoRows && !strings.Contains(err.Error(), "no such table") {
+		log.Fatal(err)
+	}
+
+	content, err = fallback(db, rowid)
+	if err != nil {
+		if err == sql.ErrNoRows || strings.Contains(err.Error(), "no such table") {
+			log.Fatalf("no document or semantic chunk with rowid %d", rowid)
+		}
+		log.Fatal(err)
+	}
+	fmt.Print(content)
 }
 
 func searchDocs(db *sql.DB, query string, limit int) {

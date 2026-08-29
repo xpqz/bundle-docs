@@ -77,9 +77,6 @@ db:  ## build deploy/dyalog-docs.db reproducibly via Docker (default)
 
 db-host: venv build  ## same DB but using the local Go + Python toolchain (faster iteration)
 	DOCS_REF="$(DOCS_REF)" deploy/build-db.sh
-	cp -f $${HOME}/.bundle-docs/dyalog-docs.db $(DB_PATH) 2>/dev/null || true
-	@# build-db.sh writes to its argument, not ~/.bundle-docs; if it ever
-	@# changes that contract this fallback is harmless.
 
 .PHONY: images push
 images: $(DB_PATH)  ## build docsearch-web + docsearch-embedder images

@@ -45,8 +45,12 @@ func TestSemanticSearchCommandSupportsFTSModeAndFetch(t *testing.T) {
 	}
 }
 
-func TestSemanticFetchPrefersChunkWhenDocRowIDCollides(t *testing.T) {
-	exe := buildDocsearchForSearch(t)
+// seedCollisionDB returns a semantic-indexed db that also has a docs
+// table row sharing rowid 1 with an existing chunk id, so tests can
+// verify -r resolves the correct one depending on -semantic-mode.
+func seedCollisionDB(t *testing.T) string {
+	t.Helper()
+
 	dbPath := seedSemanticSearchDB(t)
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -69,8 +73,35 @@ func TestSemanticFetchPrefersChunkWhenDocRowIDCollides(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("close collision db: %v", err)
 	}
+	return dbPath
+}
+
+// Plain -r (no -semantic-mode) is the documented default two-step
+// workflow's fetch step: docsearch -s ... returns a docs.rowid, then
+// docsearch -r <rowid> fetches it. It must resolve against docs even
+// when a semantic index also happens to have a chunk with the same id.
+func TestFetchPrefersDocWithoutSemanticMode(t *testing.T) {
+	exe := buildDocsearchForSearch(t)
+	dbPath := seedCollisionDB(t)
 
 	fetch := exec.Command(exe, "-d", dbPath, "-r", "1")
+	fetched, err := fetch.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fetch collision row: %v\n%s", err, fetched)
+	}
+	if !strings.Contains(string(fetched), "wrong legacy document") || strings.Contains(string(fetched), "⎕FIX fixes a script") {
+		t.Fatalf("fetch collision output = %q", fetched)
+	}
+}
+
+// -r paired with -semantic-mode signals that the id came from a
+// semantic search result, so it must resolve against chunks even when
+// a legacy docs row happens to share the same rowid.
+func TestSemanticFetchPrefersChunkWhenDocRowIDCollides(t *testing.T) {
+	exe := buildDocsearchForSearch(t)
+	dbPath := seedCollisionDB(t)
+
+	fetch := exec.Command(exe, "-d", dbPath, "-r", "1", "-semantic-mode", "fts")
 	fetched, err := fetch.CombinedOutput()
 	if err != nil {
 		t.Fatalf("fetch collision row: %v\n%s", err, fetched)
